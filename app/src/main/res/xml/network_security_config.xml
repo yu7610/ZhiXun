@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 不使用 domain-config，避免与自定义 TrustManager 的 hostname 校验冲突 -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+            <certificates src="@raw/digicert_global_root_g2" />
+            <certificates src="@raw/geotrust_g2_intermediate" />
+            <certificates src="@raw/api_tenclass_net" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
