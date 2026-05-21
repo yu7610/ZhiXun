@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /**
  * 应用进入前台时连接小智，退到后台/关闭时断开并停止服务。
@@ -21,6 +22,11 @@ object XiaozhiLifecycle {
             }
 
             override fun onStop(owner: LifecycleOwner) {
+                if (XiaozhiWakeForegroundService.isRunning()) {
+                    Log.d(TAG, "应用进入后台，语音唤醒运行中，保持 WebSocket")
+                    XiaozhiWakeForegroundService.ensureListeningActive(application)
+                    return
+                }
                 Log.d(TAG, "应用进入后台/关闭，断开小智")
                 shutdown(application)
             }

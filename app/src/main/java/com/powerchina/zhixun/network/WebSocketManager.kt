@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import okhttp3.*
 import okio.ByteString
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 
 /**
@@ -52,9 +53,27 @@ class WebSocketManager(private val context: Context) {
     private var lastUrl: String? = null
     private var lastDeviceId: String? = null
     private var lastToken: String? = null
+    private var reconnectJob: Job? = null
 
-    private val _events = MutableSharedFlow<WebSocketEvent>(replay = 1)
+    @Volatile
+    private var reconnectScheduled = false
+
+    @Volatile
+    private var connectInProgress = false
+
+    private val _events = MutableSharedFlow<WebSocketEvent>(
+        replay = 1,
+        extraBufferCapacity = 64,
+    )
     val events: SharedFlow<WebSocketEvent> = _events
+
+    private val textMessageListeners = CopyOnWriteArrayList<(String) -> Unit>()
+
+    /** 注册文本消息监听（唤醒等模块使用，与 SharedFlow 并行分发） */
+    fun addTextMessageListener(listener: (String) -> Unit): () -> Unit {
+        textMessageListeners.add(listener)
+        return { textMessageListeners.remove(listener) }
+    }
 
     private val client = OkHttpClientFactory.create(
         context = context,
@@ -67,7 +86,30 @@ class WebSocketManager(private val context: Context) {
      * 连接WebSocket
      */
     fun connect(url: String, deviceId: String, token: String) {
+        if (isConnected() &&
+            lastUrl == url &&
+            lastDeviceId == deviceId &&
+            lastToken == token
+        ) {
+            Log.d(TAG, "WebSocket已就绪，跳过重复connect")
+            return
+        }
+        if (connectInProgress) {
+            Log.d(TAG, "WebSocket连接进行中，跳过重复connect")
+            return
+        }
+        connectInProgress = true
+        reconnectJob?.cancel()
+        reconnectScheduled = false
         Log.d(TAG, "正在连接WebSocket: $url")
+
+        // 关闭旧连接，避免并发 reader 触发 EOFException
+        helloTimeoutJob?.cancel()
+        webSocket?.cancel()
+        webSocket = null
+        isConnected = false
+        isHandshakeComplete = false
+        sessionId = null
 
         // 开启自动重连
         shouldReconnect = true
@@ -76,10 +118,6 @@ class WebSocketManager(private val context: Context) {
         lastUrl = url
         lastDeviceId = deviceId
         lastToken = token
-
-        // 重置状态
-        isHandshakeComplete = false
-        sessionId = null
 
         val request = Request.Builder()
             .url(url)
@@ -103,6 +141,13 @@ class WebSocketManager(private val context: Context) {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 Log.d(TAG, "收到文本消息: $text")
+                textMessageListeners.forEach { listener ->
+                    try {
+                        listener(text)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "文本消息监听器异常", e)
+                    }
+                }
                 scope.launch {
                     handleTextMessage(text)
                     _events.emit(WebSocketEvent.TextMessage(text))
@@ -127,18 +172,32 @@ class WebSocketManager(private val context: Context) {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket连接失败", t)
-                scope.launch {
-                    val detail = when (t) {
-                        is javax.net.ssl.SSLHandshakeException ->
-                            "SSL证书校验失败，请检查系统时间或网络环境"
-                        else -> t.message ?: "连接失败"
+                if (isBenignDisconnect(t)) {
+                    Log.w(TAG, "WebSocket连接已断开（${t.javaClass.simpleName}），将自动重连")
+                } else {
+                    Log.e(TAG, "WebSocket连接失败", t)
+                    scope.launch {
+                        val detail = when (t) {
+                            is javax.net.ssl.SSLHandshakeException ->
+                                "SSL证书校验失败，请检查系统时间或网络环境"
+                            else -> t.message ?: "连接失败"
+                        }
+                        _events.emit(WebSocketEvent.Error(detail))
                     }
-                    _events.emit(WebSocketEvent.Error(detail))
                 }
                 reconnectAfterDisconnect()
             }
         })
+    }
+
+    /** 对端关闭、网络中断等常见断线，不应作为严重错误展示给用户 */
+    private fun isBenignDisconnect(t: Throwable): Boolean {
+        if (t is java.io.EOFException) return true
+        if (t is java.net.SocketException) return true
+        if (t is java.io.IOException && t.message?.contains("closed", ignoreCase = true) == true) {
+            return true
+        }
+        return false
     }
 
     private fun reconnectAfterDisconnect() {
@@ -147,6 +206,8 @@ class WebSocketManager(private val context: Context) {
         isHandshakeComplete = false
         sessionId = null
         helloTimeoutJob?.cancel()
+        webSocket = null
+        connectInProgress = false
 
         if (wasConnected) {
             scope.launch { _events.emit(WebSocketEvent.Disconnected) }
@@ -154,14 +215,27 @@ class WebSocketManager(private val context: Context) {
 
         if (!shouldReconnect) {
             Log.d(TAG, "已禁用自动重连或手动关闭，跳过重连逻辑")
+            reconnectScheduled = false
             return
         }
 
-        Log.d(TAG, "连接异常断开，准备自动重连...")
-        scope.launch {
-            if (lastUrl != null && lastDeviceId != null && lastToken != null) {
-                delay(RECONNECT_DELAY)
-                connect(lastUrl!!, lastDeviceId!!, lastToken!!)
+        if (reconnectScheduled) {
+            Log.d(TAG, "已有重连任务排队，跳过")
+            return
+        }
+        reconnectScheduled = true
+
+        Log.d(TAG, "连接断开，${RECONNECT_DELAY}ms 后自动重连...")
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            delay(RECONNECT_DELAY)
+            reconnectScheduled = false
+            if (!shouldReconnect) return@launch
+            val url = lastUrl
+            val deviceId = lastDeviceId
+            val token = lastToken
+            if (url != null && deviceId != null && token != null) {
+                connect(url, deviceId, token)
             }
         }
     }
@@ -195,6 +269,7 @@ class WebSocketManager(private val context: Context) {
             helloTimeoutJob?.cancel()
 
             Log.d(TAG, "握手完成1，session_id: $sessionId")
+            connectInProgress = false
             scope.launch {
                 Log.d(TAG, "握手完成2，session_id: $sessionId")
                 Log.d(TAG, "发送HelloReceived事件")
@@ -205,6 +280,7 @@ class WebSocketManager(private val context: Context) {
             }
         } else {
             Log.e(TAG, "服务器返回的transport不匹配: $transport")
+            connectInProgress = false
             scope.launch {
                 _events.emit(WebSocketEvent.Error("握手失败：transport不匹配"))
             }
@@ -219,6 +295,7 @@ class WebSocketManager(private val context: Context) {
             delay(HELLO_TIMEOUT)
             if (!isHandshakeComplete) {
                 Log.e(TAG, "Hello握手超时")
+                connectInProgress = false
                 _events.emit(WebSocketEvent.Error("握手超时"))
                 disconnect()
             }
@@ -346,6 +423,9 @@ class WebSocketManager(private val context: Context) {
      */
     fun disconnect() {
         shouldReconnect = false
+        reconnectJob?.cancel()
+        reconnectScheduled = false
+        connectInProgress = false
         helloTimeoutJob?.cancel()
         val wasActive = isConnected || isHandshakeComplete
         webSocket?.close(1000, "正常关闭")

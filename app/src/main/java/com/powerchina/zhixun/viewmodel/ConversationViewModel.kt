@@ -15,6 +15,8 @@ import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.data.XiaozhiConfig
 import com.powerchina.zhixun.network.WebSocketEvent
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
+import com.powerchina.zhixun.xiaozhi.wake.WakePhraseMatcher
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -83,6 +85,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private var shouldResumeOnUiReturn = false
     private var resumeManualListening = false
 
+    // 语音唤醒「你好」后待进入对话
+    private var pendingVoiceWake = false
+
     init {
         startEventListening()
         viewModelScope.launch {
@@ -116,6 +121,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             pauseConversationForUi()
         } else {
             resumeConversationForUi()
+            tryHandlePendingVoiceWake()
         }
     }
 
@@ -126,6 +132,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
         audioManager.stopRecording()
         audioManager.stopPlaying()
+        audioManager.releaseRecorderOnly()
         when (current) {
             ConversationState.LISTENING -> webSocketManager.sendStopListening()
             ConversationState.SPEAKING,
@@ -134,6 +141,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
         _state.value = ConversationState.IDLE
         Log.d(TAG, "对话页离开，进入待机 (resumeOnReturn=$shouldResumeOnUiReturn)")
+        resumeWakeListeningIfNeeded()
     }
 
     private fun resumeConversationForUi() {
@@ -147,6 +155,41 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             tryStartAutoConversationIfNeeded()
         } else if (manual) {
             startListening()
+        }
+        tryHandlePendingVoiceWake()
+    }
+
+    /**
+     * 检测到「你好」后：连接小智并进入自动对话。
+     */
+    fun onVoiceWakeDetected() {
+        Log.i(TAG, "语音唤醒：${WakePhraseMatcher.WAKE_PHRASE}")
+        isAutoMode = true
+        pendingVoiceWake = true
+        connect()
+        tryHandlePendingVoiceWake()
+    }
+
+    private fun tryHandlePendingVoiceWake() {
+        if (!pendingVoiceWake || !conversationUiActive) return
+        if (!_isConnected.value) return
+        if (_state.value != ConversationState.IDLE) return
+        if (!isAudioInitialized || !audioManager.isReady()) return
+
+        pendingVoiceWake = false
+        pauseWakeListening()
+        webSocketManager.sendWakeWordDetected(WakePhraseMatcher.WAKE_PHRASE)
+        startAutoConversation()
+    }
+
+    private fun pauseWakeListening() {
+        XiaozhiWakeForegroundService.pauseListening(getApplication())
+    }
+
+    private fun resumeWakeListeningIfNeeded() {
+        if (_state.value != ConversationState.LISTENING && !pendingVoiceWake) {
+            Log.d(TAG, "恢复语音唤醒监听")
+            XiaozhiWakeForegroundService.ensureListeningActive(getApplication())
         }
     }
 
@@ -169,10 +212,19 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         isAudioInitialized = true
         _errorMessage.value = null
         Log.d(TAG, "音频系统初始化成功")
+        tryHandlePendingVoiceWake()
         tryStartAutoConversationIfNeeded()
     }
 
     private fun tryStartAutoConversationIfNeeded() {
+        if (pendingVoiceWake) {
+            tryHandlePendingVoiceWake()
+            return
+        }
+        if (XiaozhiWakeForegroundService.isWakeListeningActive()) {
+            Log.d(TAG, "语音唤醒监听中，跳过自动开麦")
+            return
+        }
         if (!conversationUiActive || !_isConnected.value) return
         if (_state.value != ConversationState.IDLE) return
         if (!isAudioInitialized || !audioManager.isReady()) {
@@ -227,6 +279,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         if (sessionManager.isConnected.value) {
             _isConnected.value = true
             _state.value = ConversationState.IDLE
+            tryHandlePendingVoiceWake()
             tryStartAutoConversationIfNeeded()
             return
         }
@@ -256,14 +309,17 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             is WebSocketEvent.Connected -> {
                 Log.d(TAG, "WebSocket连接成功")
                 _isConnected.value = true
-                _state.value = ConversationState.IDLE
                 _errorMessage.value = null
+                if (_state.value == ConversationState.CONNECTING) {
+                    _state.value = ConversationState.IDLE
+                }
+                tryHandlePendingVoiceWake()
                 tryStartAutoConversationIfNeeded()
             }
 
             is WebSocketEvent.Disconnected -> {
                 Log.d(TAG, "WebSocket连接断开")
-                _state.value = ConversationState.IDLE
+                _isConnected.value = false
                 audioManager.stopRecording()
                 audioManager.stopPlaying()
             }
@@ -421,6 +477,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         webSocketManager.sendStartListening("manual")
+        pauseWakeListening()
         Log.d(TAG, "开始手动聆听")
     }
 
@@ -450,6 +507,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         webSocketManager.sendStartListening("auto")
+        pauseWakeListening()
         Log.d(TAG, "开始自动对话模式")
     }
 
@@ -528,6 +586,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         webSocketManager.sendStartListening("auto")
+        pauseWakeListening()
         Log.d(TAG, "开始下一轮自动对话")
     }
 
@@ -566,6 +625,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         // 退出自动模式
         isAutoMode = false
         _state.value = ConversationState.IDLE
+        resumeWakeListeningIfNeeded()
         Log.d(TAG, "用户打断对话")
     }
 
@@ -579,6 +639,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         sessionManager.disconnect()
         _state.value = ConversationState.IDLE
         isAutoMode = false
+        resumeWakeListeningIfNeeded()
     }
 
     /**
@@ -632,6 +693,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         
         _state.value = ConversationState.IDLE
         Log.d(TAG, "停止自动对话模式")
+        resumeWakeListeningIfNeeded()
     }
 
     /**

@@ -60,6 +60,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -76,6 +77,7 @@ import com.powerchina.zhixun.data.Message
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.viewmodel.ConversationState
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import kotlinx.coroutines.launch
 
 private val AuraBgTop = Color(0xFFF8F9FF)
@@ -93,6 +95,7 @@ fun ConversationScreen(
     onBack: (() -> Unit)? = null,
     viewModel: ConversationViewModel = viewModel(),
 ) {
+    val appContext = LocalContext.current
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
@@ -103,10 +106,13 @@ fun ConversationScreen(
     }
 
     val permissionsState = rememberMultiplePermissionsState(
-        permissions = listOf(
-            android.Manifest.permission.RECORD_AUDIO,
-            android.Manifest.permission.MODIFY_AUDIO_SETTINGS
-        )
+        permissions = buildList {
+            add(android.Manifest.permission.RECORD_AUDIO)
+            add(android.Manifest.permission.MODIFY_AUDIO_SETTINGS)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                add(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        },
     )
 
     val errorMessage by viewModel.errorMessage.collectAsState()
@@ -134,6 +140,7 @@ fun ConversationScreen(
 
     LaunchedEffect(permissionsState.allPermissionsGranted) {
         if (permissionsState.allPermissionsGranted) {
+            XiaozhiWakeForegroundService.ensureStarted(appContext)
             viewModel.initializeAudio()
             viewModel.connect()
         } else {

@@ -235,12 +235,22 @@ class EnhancedAudioManager(private val context: Context) {
             Log.d(TAG, "开始录音")
 
             scope.launch {
-                val buffer = ByteArray(FRAME_SIZE)
+                val readBuffer = ByteArray(FRAME_SIZE)
+                val pcmFrame = ByteArray(FRAME_SIZE)
+                var pcmFilled = 0
                 while (isRecording) {
-                    val bytesRead = record.read(buffer, 0, buffer.size)
-                    if (bytesRead > 0) {
+                    val bytesRead = record.read(readBuffer, 0, readBuffer.size)
+                    if (bytesRead <= 0) continue
+                    var offset = 0
+                    while (offset < bytesRead) {
+                        val toCopy = minOf(FRAME_SIZE - pcmFilled, bytesRead - offset)
+                        System.arraycopy(readBuffer, offset, pcmFrame, pcmFilled, toCopy)
+                        pcmFilled += toCopy
+                        offset += toCopy
+                        if (pcmFilled < FRAME_SIZE) continue
+                        pcmFilled = 0
                         opusEncoder?.let { encoder ->
-                            val opusData = encoder.encode(buffer.copyOf(bytesRead))
+                            val opusData = encoder.encode(pcmFrame.copyOf())
                             opusData?.let {
                                 _audioEvents.emit(AudioEvent.AudioData(it))
                             }
@@ -272,6 +282,29 @@ class EnhancedAudioManager(private val context: Context) {
             Log.w(TAG, "停止录音异常", e)
         }
         Log.d(TAG, "停止录音")
+    }
+
+    /**
+     * 释放 AudioRecord，把麦克风让给语音唤醒服务（对话页离开/退后台时调用）。
+     */
+    fun releaseRecorderOnly() {
+        stopRecording()
+        try {
+            acousticEchoCanceler?.release()
+        } catch (_: Exception) {
+        }
+        acousticEchoCanceler = null
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Exception) {
+        }
+        noiseSuppressor = null
+        try {
+            audioRecord?.release()
+        } catch (_: Exception) {
+        }
+        audioRecord = null
+        Log.d(TAG, "录音器已释放，麦克风可用于语音唤醒")
     }
 
     /**

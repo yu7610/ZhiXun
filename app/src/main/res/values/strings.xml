@@ -51,4 +51,8 @@
     <string name="dashcam_flip_camera">切换镜头</string>
     <string name="dashcam_empty_clips">暂无本地录像</string>
     <string name="dashcam_playback_close">关闭播放</string>
+    <string name="wake_notification_channel">语音唤醒</string>
+    <string name="wake_notification_channel_desc">后台监听「你好」</string>
+    <string name="wake_notification_title">小智语音唤醒</string>
+    <string name="wake_notification_text">正在监听：你好（需联网）</string>
 </resources>

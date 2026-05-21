@@ -1,7 +1,6 @@
 package com.powerchina.zhixun.xiaozhi
 
 import android.app.Application
-import android.util.Log
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.data.XiaozhiConfig
 import com.powerchina.zhixun.network.OtaService
@@ -13,9 +12,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 小智后台会话：应用启动后自动 OTA + WebSocket 连接，与 UI 生命周期解耦。
@@ -54,17 +55,17 @@ class XiaozhiSessionManager private constructor(
                         _isConnected.value = true
                         _isConnecting.value = false
                         _lastError.value = null
-                        Log.i(TAG, "后台 WebSocket 已连接")
+                        XiaozhiLog.i(MODULE, "WebSocket Connected")
                     }
                     is WebSocketEvent.Disconnected -> {
                         _isConnected.value = false
                         _isConnecting.value = false
-                        Log.i(TAG, "后台 WebSocket 已断开")
+                        XiaozhiLog.i(MODULE, "WebSocket Disconnected")
                     }
                     is WebSocketEvent.Error -> {
                         _isConnecting.value = false
                         _lastError.value = event.error
-                        Log.e(TAG, "后台 WebSocket 错误: ${event.error}")
+                        XiaozhiLog.e(MODULE, "WebSocket Error: ${event.error}")
                     }
                     else -> Unit
                 }
@@ -85,7 +86,7 @@ class XiaozhiSessionManager private constructor(
             old.token != newConfig.token ||
             old.otaUrl != newConfig.otaUrl
         ) {
-            Log.i(TAG, "配置变更，重新连接")
+            XiaozhiLog.i(MODULE, "配置变更，重新连接")
             disconnect()
             ensureConnected()
         }
@@ -98,28 +99,36 @@ class XiaozhiSessionManager private constructor(
         webSocketManager.enableReconnect()
         if (webSocketManager.isConnected()) {
             _isConnected.value = true
+            XiaozhiLog.d(MODULE, "ensureConnected: 已连接，跳过")
             return
         }
         if (_awaitingActivation.value) {
-            Log.d(TAG, "等待设备激活，跳过连接")
+            XiaozhiLog.d(MODULE, "ensureConnected: 等待激活，跳过")
             return
         }
         if (!isNetworkConfigReady()) {
-            Log.w(TAG, "OTA/WSS/MAC/Token 未配置完整，跳过自动连接")
+            XiaozhiLog.w(MODULE, "ensureConnected: OTA/WSS/MAC/Token 未配置完整")
             return
         }
 
+        XiaozhiLog.d(MODULE, "ensureConnected: 排队连接任务")
         scope.launch {
             connectMutex.withLock {
-                if (webSocketManager.isConnected() || _isConnecting.value) return@withLock
+                if (webSocketManager.isConnected()) {
+                    XiaozhiLog.d(MODULE, "connectMutex: 已连接，跳过")
+                    return@withLock
+                }
+                if (_isConnecting.value) {
+                    XiaozhiLog.d(MODULE, "connectMutex: 连接进行中，跳过")
+                    return@withLock
+                }
                 _isConnecting.value = true
                 _lastError.value = null
+                XiaozhiLog.i(MODULE, "开始 OTA + WebSocket 连接")
                 try {
                     performOtaAndConnect()
                 } finally {
-                    if (!webSocketManager.isConnected()) {
-                        _isConnecting.value = false
-                    }
+                    _isConnecting.value = false
                 }
             }
         }
@@ -186,12 +195,11 @@ class XiaozhiSessionManager private constructor(
         }
     }
 
-    private fun openWebSocket() {
+    private suspend fun openWebSocket() {
         val url = config.websocketUrl
         if (url.isBlank()) {
             Log.e(TAG, "WebSocket URL 为空")
             _lastError.value = "WebSocket 地址未配置"
-            _isConnecting.value = false
             return
         }
         Log.d(TAG, "连接 WebSocket: $url")
@@ -200,10 +208,25 @@ class XiaozhiSessionManager private constructor(
             deviceId = config.macAddress,
             token = config.token,
         )
+        val connected = withTimeoutOrNull(20_000) {
+            while (!webSocketManager.isConnected()) {
+                delay(100)
+            }
+            true
+        } ?: false
+        if (connected) {
+            _isConnected.value = true
+            _isConnecting.value = false
+            _lastError.value = null
+            Log.i(TAG, "WebSocket 握手完成")
+        } else {
+            Log.e(TAG, "WebSocket 握手超时")
+            _lastError.value = "WebSocket 握手超时"
+        }
     }
 
     companion object {
-        private const val TAG = "XiaozhiSessionManager"
+        private const val MODULE = "Session"
 
         @Volatile
         private var instance: XiaozhiSessionManager? = null

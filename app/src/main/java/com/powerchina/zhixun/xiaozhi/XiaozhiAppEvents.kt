@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 
 data class OpenConversationRequest(
     val autoConnect: Boolean = false,
+    val fromVoiceWake: Boolean = false,
 )
 
 /**
@@ -19,9 +20,14 @@ object XiaozhiAppEvents {
     var pendingAutoConnect: Boolean = false
         private set
 
-    fun requestOpenConversation(autoConnect: Boolean = false) {
-        if (autoConnect) pendingAutoConnect = true
-        _requests.tryEmit(OpenConversationRequest(autoConnect = autoConnect))
+    fun requestOpenConversation(autoConnect: Boolean = false, fromVoiceWake: Boolean = false) {
+        if (autoConnect || fromVoiceWake) pendingAutoConnect = true
+        _requests.tryEmit(
+            OpenConversationRequest(
+                autoConnect = autoConnect,
+                fromVoiceWake = fromVoiceWake,
+            ),
+        )
     }
 
     fun consumeAutoConnect(): Boolean {

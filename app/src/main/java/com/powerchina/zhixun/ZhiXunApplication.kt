@@ -8,6 +8,7 @@ import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 import com.powerchina.zhixun.dashcam.VideoKeyRegistrar
 import com.powerchina.zhixun.physicalkey.PhysicalKeyLifecycle
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import com.powerchina.zhixun.xiaozhi.XiaozhiLifecycle
 
 class ZhiXunApplication : Application(), CameraXConfig.Provider {
@@ -22,6 +23,7 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         VideoKeyRegistrar.register(this)
         VideoKeyHandler.logTestCommands(this)
         XiaozhiLifecycle.register(this)
+        XiaozhiWakeForegroundService.ensureStarted(this)
     }
 
     override fun getCameraXConfig(): CameraXConfig {

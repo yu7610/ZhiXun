@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.powerchina.zhixun.util.ScreenOnHelper
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /** 执法拍摄 / 行车记录仪独立页面 */
 class DashcamActivity : ComponentActivity() {
@@ -14,6 +15,7 @@ class DashcamActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         ScreenOnHelper.keepScreenOn(this)
+        XiaozhiWakeForegroundService.ensureStarted(this)
         setContent {
             DashcamScreen(onBack = { finish() })
         }

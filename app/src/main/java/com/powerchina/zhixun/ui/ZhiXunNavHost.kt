@@ -43,13 +43,16 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
         }
 
         LaunchedEffect(Unit) {
-            XiaozhiAppEvents.requests.collect {
+            XiaozhiAppEvents.requests.collect { req ->
                 val cfg = configManager.loadConfig()
                 if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
                     navController.navigate(AppRoutes.Settings)
                 } else {
                     conversationViewModel.updateConfig(cfg)
                     sessionManager.ensureConnected()
+                    if (req.fromVoiceWake) {
+                        conversationViewModel.onVoiceWakeDetected()
+                    }
                     if (navController.currentDestination?.route != AppRoutes.Conversation) {
                         navController.navigate(AppRoutes.Conversation) {
                             popUpTo(AppRoutes.Conversation) { inclusive = true }

@@ -50,6 +50,7 @@ object OkHttpClientFactory {
             .connectTimeout(connectTimeoutSec, TimeUnit.SECONDS)
             .readTimeout(readTimeoutSec, TimeUnit.SECONDS)
             .writeTimeout(writeTimeoutSec, TimeUnit.SECONDS)
+            .pingInterval(30, TimeUnit.SECONDS)
             .sslSocketFactory(sslContext.socketFactory, trustManager)
             .build()
     }
