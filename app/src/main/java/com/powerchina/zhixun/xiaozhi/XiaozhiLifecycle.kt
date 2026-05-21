@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /**
@@ -12,22 +13,26 @@ import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
  */
 object XiaozhiLifecycle {
 
-    private const val TAG = "XiaozhiLifecycle"
+    private const val TAG = "Lifecycle"
 
     fun register(application: Application) {
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
-                Log.d(TAG, "应用进入前台，启动小智连接")
+                Log.d(TAG, "应用进入前台 → ensureConnected")
                 XiaozhiSessionManager.getInstance(application).ensureConnected()
             }
 
             override fun onStop(owner: LifecycleOwner) {
                 if (XiaozhiWakeForegroundService.isRunning()) {
-                    Log.d(TAG, "应用进入后台，语音唤醒运行中，保持 WebSocket")
-                    XiaozhiWakeForegroundService.ensureListeningActive(application)
+                    Log.d(TAG, "应用进入后台，唤醒服务运行中 → 保持 WebSocket + 唤醒")
+                    if (!XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
+                        XiaozhiWakeForegroundService.ensureListeningActive(application)
+                    } else {
+                        Log.d(TAG, "唤醒交接中，不恢复后台监听")
+                    }
                     return
                 }
-                Log.d(TAG, "应用进入后台/关闭，断开小智")
+                Log.d(TAG, "应用进入后台，无唤醒服务 → shutdown")
                 shutdown(application)
             }
         })

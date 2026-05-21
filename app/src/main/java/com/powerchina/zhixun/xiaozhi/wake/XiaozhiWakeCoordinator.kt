@@ -1,11 +1,14 @@
 package com.powerchina.zhixun.xiaozhi.wake
 
+import android.util.Log
+
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import com.powerchina.zhixun.MainActivity
 import com.powerchina.zhixun.data.ConfigManager
-import com.powerchina.zhixun.xiaozhi.XiaozhiLog
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 
 /**
@@ -13,8 +16,11 @@ import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
  */
 object XiaozhiWakeCoordinator {
 
-    private const val MODULE = "WakeCoord"
+    private const val TAG = "WakeCoord"
     private const val DEBOUNCE_MS = 3000L
+    private const val HANDOFF_TIMEOUT_MS = 15_000L
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var lastWakeAtMs = 0L
 
@@ -22,31 +28,50 @@ object XiaozhiWakeCoordinator {
     @Volatile
     private var wakeHandoffInProgress = false
 
+    private val handoffTimeoutRunnable = Runnable {
+        if (!wakeHandoffInProgress) return@Runnable
+        wakeHandoffInProgress = false
+        Log.w(TAG, "唤醒交接超时，恢复后台监听")
+        val ctx = appContextForHandoff ?: return@Runnable
+        XiaozhiWakeForegroundService.resumeListening(ctx)
+    }
+
+    @Volatile
+    private var appContextForHandoff: Context? = null
+
     fun isWakeHandoffInProgress(): Boolean = wakeHandoffInProgress
 
     fun clearWakeHandoff(reason: String) {
         if (!wakeHandoffInProgress) return
         wakeHandoffInProgress = false
-        XiaozhiLog.d(MODULE, "唤醒交接完成: $reason")
+        mainHandler.removeCallbacks(handoffTimeoutRunnable)
+        Log.d(TAG, "唤醒交接完成: $reason")
+    }
+
+    private fun scheduleHandoffTimeout(context: Context) {
+        appContextForHandoff = context.applicationContext
+        mainHandler.removeCallbacks(handoffTimeoutRunnable)
+        mainHandler.postDelayed(handoffTimeoutRunnable, HANDOFF_TIMEOUT_MS)
     }
 
     fun onWakeDetected(context: Context) {
         val now = System.currentTimeMillis()
         if (now - lastWakeAtMs < DEBOUNCE_MS) {
-            XiaozhiLog.d(MODULE, "忽略重复唤醒 (debounce ${now - lastWakeAtMs}ms)")
+            Log.d(TAG, "忽略重复唤醒 (debounce ${now - lastWakeAtMs}ms)")
             return
         }
         lastWakeAtMs = now
 
         val appContext = context.applicationContext
         if (!isConfigReady(appContext)) {
-            XiaozhiLog.w(MODULE, "小智未配置，忽略唤醒")
+            Log.w(TAG, "小智未配置，忽略唤醒")
             XiaozhiWakeForegroundService.resumeListening(appContext)
             return
         }
 
         wakeHandoffInProgress = true
-        XiaozhiLog.i(MODULE, "★ 语音唤醒触发：${WakePhraseMatcher.WAKE_PHRASE}")
+        scheduleHandoffTimeout(appContext)
+        Log.i(TAG, "★ 语音唤醒触发：${WakePhraseMatcher.WAKE_PHRASE}")
 
         XiaozhiWakeForegroundService.pauseListening(appContext)
         wakeScreen(appContext)
@@ -64,7 +89,7 @@ object XiaozhiWakeCoordinator {
             putExtra(MainActivity.EXTRA_AUTO_CONNECT, true)
             putExtra(MainActivity.EXTRA_WAKE_FROM_VOICE, true)
         }
-        XiaozhiLog.i(MODULE, "启动 MainActivity 打开对话页")
+        Log.i(TAG, "启动 MainActivity 打开对话页")
         appContext.startActivity(launchIntent)
     }
 
@@ -87,6 +112,6 @@ object XiaozhiWakeCoordinator {
         if (wakeLock.isHeld) {
             wakeLock.release()
         }
-        XiaozhiLog.d(MODULE, "已请求亮屏")
+        Log.d(TAG, "已请求亮屏")
     }
 }

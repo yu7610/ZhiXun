@@ -61,6 +61,9 @@ class WebSocketManager(private val context: Context) {
     @Volatile
     private var connectInProgress = false
 
+    @Volatile
+    private var connectionGeneration = 0
+
     private val _events = MutableSharedFlow<WebSocketEvent>(
         replay = 1,
         extraBufferCapacity = 64,
@@ -91,17 +94,18 @@ class WebSocketManager(private val context: Context) {
             lastDeviceId == deviceId &&
             lastToken == token
         ) {
-            Log.d(TAG, "WebSocket已就绪，跳过重复connect")
+            Log.d(TAG, "已就绪，跳过 connect session=$sessionId")
             return
         }
         if (connectInProgress) {
-            Log.d(TAG, "WebSocket连接进行中，跳过重复connect")
+            Log.d(TAG, "连接进行中，跳过 connect")
             return
         }
         connectInProgress = true
         reconnectJob?.cancel()
         reconnectScheduled = false
-        Log.d(TAG, "正在连接WebSocket: $url")
+        val generation = ++connectionGeneration
+        Log.d(TAG, "正在连接WebSocket: $url gen=$generation")
 
         // 关闭旧连接，避免并发 reader 触发 EOFException
         helloTimeoutJob?.cancel()
@@ -128,18 +132,20 @@ class WebSocketManager(private val context: Context) {
             .build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            private fun isStale(): Boolean = generation != connectionGeneration
+
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket连接成功，开始握手")
+                if (isStale()) return
+                Log.d(TAG, "WebSocket连接成功，开始握手 gen=$generation")
                 isConnected = true
                 scope.launch {
-                    // 发送Hello消息
                     sendHelloMessage()
-                    // 启动超时检查
                     startHelloTimeout()
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (isStale()) return
                 Log.d(TAG, "收到文本消息: $text")
                 textMessageListeners.forEach { listener ->
                     try {
@@ -155,6 +161,7 @@ class WebSocketManager(private val context: Context) {
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (isStale()) return
                 Log.d(TAG, "收到二进制消息，长度: ${bytes.size}")
                 scope.launch {
                     _events.emit(WebSocketEvent.BinaryMessage(bytes.toByteArray()))
@@ -162,16 +169,24 @@ class WebSocketManager(private val context: Context) {
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WebSocket正在关闭: $code - $reason")
-                reconnectAfterDisconnect()
+                if (isStale()) return
+                Log.d(TAG, "WebSocket正在关闭: $code - $reason gen=$generation")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (isStale()) {
+                    Log.d(TAG, "忽略旧连接 onClosed gen=$generation")
+                    return
+                }
                 Log.d(TAG, "WebSocket已关闭: $code - $reason")
                 reconnectAfterDisconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (isStale()) {
+                    Log.d(TAG, "忽略旧连接 onFailure gen=$generation: ${t.message}")
+                    return
+                }
                 if (isBenignDisconnect(t)) {
                     Log.w(TAG, "WebSocket连接已断开（${t.javaClass.simpleName}），将自动重连")
                 } else {
@@ -190,10 +205,16 @@ class WebSocketManager(private val context: Context) {
         })
     }
 
-    /** 对端关闭、网络中断等常见断线，不应作为严重错误展示给用户 */
+    /** 对端关闭、网络中断、ping 超时等常见断线，不应作为严重错误展示给用户 */
     private fun isBenignDisconnect(t: Throwable): Boolean {
         if (t is java.io.EOFException) return true
         if (t is java.net.SocketException) return true
+        if (t is java.net.SocketTimeoutException) {
+            val msg = t.message.orEmpty()
+            if (msg.contains("ping", ignoreCase = true) && msg.contains("pong", ignoreCase = true)) {
+                return true
+            }
+        }
         if (t is java.io.IOException && t.message?.contains("closed", ignoreCase = true) == true) {
             return true
         }
@@ -426,6 +447,7 @@ class WebSocketManager(private val context: Context) {
         reconnectJob?.cancel()
         reconnectScheduled = false
         connectInProgress = false
+        connectionGeneration++
         helloTimeoutJob?.cancel()
         val wasActive = isConnected || isHandshakeComplete
         webSocket?.close(1000, "正常关闭")

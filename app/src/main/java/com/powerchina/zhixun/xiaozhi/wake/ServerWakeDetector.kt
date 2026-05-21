@@ -1,6 +1,7 @@
 package com.powerchina.zhixun.xiaozhi.wake
 
 import android.app.Application
+import android.util.Log
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -13,7 +14,6 @@ import com.google.gson.JsonObject
 import com.powerchina.zhixun.audio.utils.OpusEncoder
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.network.WebSocketEvent
-import com.powerchina.zhixun.xiaozhi.XiaozhiLog
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +34,7 @@ class ServerWakeDetector(
 ) : WakeListener {
 
     companion object {
-        private const val MODULE = "WakeSTT"
+        private const val TAG = "WakeSTT"
         private const val SAMPLE_RATE = 16_000
         private const val FRAME_MS = 60
         private const val FRAME_BYTES = SAMPLE_RATE * FRAME_MS / 1000 * 2
@@ -64,18 +64,18 @@ class ServerWakeDetector(
 
     override fun start() {
         if (active) {
-            XiaozhiLog.d(MODULE, "已在运行，跳过 start")
+            Log.d(TAG, "已在运行，跳过 start")
             return
         }
         if (!isConfigReady()) {
-            XiaozhiLog.e(MODULE, "小智未配置，无法使用服务端唤醒")
+            Log.e(TAG, "小智未配置，无法使用服务端唤醒")
             return
         }
         active = true
         streamGeneration++
         acquireWakeLock()
         registerTextListener()
-        XiaozhiLog.i(MODULE, "启动服务端 STT 唤醒，关键词=${WakePhraseMatcher.WAKE_PHRASE}")
+        Log.i(TAG, "启动服务端 STT 唤醒，关键词=${WakePhraseMatcher.WAKE_PHRASE}")
         sessionManager.ensureConnected()
         eventJob = scope.launch { listenWebSocketEvents() }
         launchStreaming("start")
@@ -83,7 +83,7 @@ class ServerWakeDetector(
 
     override fun pause() {
         if (!active) return
-        XiaozhiLog.d(MODULE, "暂停服务端唤醒")
+        Log.d(TAG, "暂停服务端唤醒")
         active = false
         streamingJob?.cancel()
         streamingJob = null
@@ -93,7 +93,7 @@ class ServerWakeDetector(
     }
 
     override fun stop() {
-        XiaozhiLog.d(MODULE, "停止服务端唤醒")
+        Log.d(TAG, "停止服务端唤醒")
         active = false
         streamGeneration++
         unregisterTextListener()
@@ -123,7 +123,7 @@ class ServerWakeDetector(
         val gen = streamGeneration
         streamingJob?.cancel()
         streamingJob = scope.launch {
-            XiaozhiLog.d(MODULE, "推流任务启动 reason=$reason gen=$gen")
+            Log.d(TAG, "推流任务启动 reason=$reason gen=$gen")
             waitConnectAndStream(gen)
         }
     }
@@ -140,12 +140,12 @@ class ServerWakeDetector(
 
         if (!active || generation != streamGeneration) return
         if (!connected) {
-            XiaozhiLog.e(MODULE, "WebSocket 未连接，服务端唤醒失败 gen=$generation")
+            Log.e(TAG, "WebSocket 未连接，服务端唤醒失败 gen=$generation")
             return
         }
 
-        XiaozhiLog.i(
-            MODULE,
+        Log.i(
+            TAG,
             "WebSocket 就绪 session=${webSocket.getSessionId()}，发送 listen/start",
         )
         webSocket.sendStartListening("auto")
@@ -157,11 +157,11 @@ class ServerWakeDetector(
             if (!active) return@collect
             when (event) {
                 is WebSocketEvent.Connected -> {
-                    XiaozhiLog.i(MODULE, "WebSocket Connected，重启唤醒推流")
+                    Log.i(TAG, "WebSocket Connected，重启唤醒推流")
                     launchStreaming("reconnect")
                 }
                 is WebSocketEvent.Disconnected -> {
-                    XiaozhiLog.w(MODULE, "WebSocket Disconnected，等待重连")
+                    Log.w(TAG, "WebSocket Disconnected，等待重连")
                 }
                 else -> Unit
             }
@@ -176,14 +176,14 @@ class ServerWakeDetector(
                 "stt" -> {
                     val text = json.get("text")?.asString ?: return
                     val matched = WakePhraseMatcher.matches(text)
-                    XiaozhiLog.i(MODULE, "STT: \"$text\" matched=$matched")
+                    Log.i(TAG, "STT: \"$text\" matched=$matched")
                     if (matched) {
                         triggerWake()
                     }
                 }
             }
         } catch (e: Exception) {
-            XiaozhiLog.w(MODULE, "解析 WebSocket 文本失败", e)
+            Log.w(TAG, "解析 WebSocket 文本失败", e)
         }
     }
 
@@ -191,12 +191,14 @@ class ServerWakeDetector(
         if (!active) return
         active = false
         streamGeneration++
-        XiaozhiLog.i(MODULE, "★ 命中唤醒词「${WakePhraseMatcher.WAKE_PHRASE}」")
+        Log.i(TAG, "★ 命中唤醒词「${WakePhraseMatcher.WAKE_PHRASE}」")
         unregisterTextListener()
         streamingJob?.cancel()
         streamingJob = null
         eventJob?.cancel()
         eventJob = null
+        // 取消服务端对已识别唤醒词的 TTS 回复，避免与对话页冲突
+        webSocket.sendAbort("wake_handoff")
         webSocket.sendStopListening()
         stopAudio()
         releaseWakeLock()
@@ -206,13 +208,13 @@ class ServerWakeDetector(
     private suspend fun streamAudioLoop(generation: Int) {
         stopAudio()
         if (!createAudioRecord()) {
-            XiaozhiLog.e(MODULE, "AudioRecord 创建失败")
+            Log.e(TAG, "AudioRecord 创建失败")
             return
         }
         try {
             opusEncoder = OpusEncoder(SAMPLE_RATE, 1, FRAME_MS)
         } catch (e: Exception) {
-            XiaozhiLog.e(MODULE, "OpusEncoder 初始化失败", e)
+            Log.e(TAG, "OpusEncoder 初始化失败", e)
             return
         }
 
@@ -225,7 +227,7 @@ class ServerWakeDetector(
         var lastHeartbeat = System.currentTimeMillis()
 
         audioRecord?.startRecording()
-        XiaozhiLog.i(MODULE, "Opus 推流开始 gen=$generation")
+        Log.i(TAG, "Opus 推流开始 gen=$generation")
 
         while (active && generation == streamGeneration && scope.isActive) {
             val read = audioRecord?.read(readBuffer, 0, readBuffer.size) ?: break
@@ -257,8 +259,8 @@ class ServerWakeDetector(
 
                 val now = System.currentTimeMillis()
                 if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
-                    XiaozhiLog.d(
-                        MODULE,
+                    Log.d(
+                        TAG,
                         "心跳 gen=$generation frames=$framesSent encodeFail=$encodeFailures " +
                             "wsSkip=$notReadySkips session=${webSocket.getSessionId()}",
                     )
@@ -266,8 +268,8 @@ class ServerWakeDetector(
                 }
             }
         }
-        XiaozhiLog.d(
-            MODULE,
+        Log.d(
+            TAG,
             "推流结束 gen=$generation frames=$framesSent reason=${if (!active) "paused" else "cancelled"}",
         )
     }
@@ -295,12 +297,12 @@ class ServerWakeDetector(
                 )
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
                     audioRecord = record
-                    XiaozhiLog.i(MODULE, "AudioRecord 就绪 source=$source buffer=$minBuffer")
+                    Log.i(TAG, "AudioRecord 就绪 source=$source buffer=$minBuffer")
                     return true
                 }
                 record.release()
             } catch (e: Exception) {
-                XiaozhiLog.w(MODULE, "AudioRecord source=$source 失败: ${e.message}")
+                Log.w(TAG, "AudioRecord source=$source 失败: ${e.message}")
             }
         }
         return false

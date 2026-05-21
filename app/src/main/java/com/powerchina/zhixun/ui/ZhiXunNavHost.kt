@@ -1,5 +1,7 @@
 package com.powerchina.zhixun.ui
 
+import android.util.Log
+
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -16,6 +18,8 @@ import com.powerchina.zhixun.ui.theme.YTheme
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
+
+private const val TAG = "ZhiXunNavHost"
 
 object AppRoutes {
     const val Conversation = "conversation"
@@ -44,8 +48,13 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
 
         LaunchedEffect(Unit) {
             XiaozhiAppEvents.requests.collect { req ->
+                Log.i(
+                    TAG,
+                    "收到打开对话请求 wake=${req.fromVoiceWake} autoConnect=${req.autoConnect}",
+                )
                 val cfg = configManager.loadConfig()
                 if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
+                    Log.w(TAG, "未配置，跳转设置页")
                     navController.navigate(AppRoutes.Settings)
                 } else {
                     conversationViewModel.updateConfig(cfg)
@@ -54,10 +63,13 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                         conversationViewModel.onVoiceWakeDetected()
                     }
                     if (navController.currentDestination?.route != AppRoutes.Conversation) {
+                        Log.d(TAG, "导航到对话页")
                         navController.navigate(AppRoutes.Conversation) {
                             popUpTo(AppRoutes.Conversation) { inclusive = true }
                             launchSingleTop = true
                         }
+                    } else {
+                        Log.d(TAG, "已在对话页")
                     }
                 }
             }

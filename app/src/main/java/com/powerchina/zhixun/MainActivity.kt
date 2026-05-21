@@ -1,5 +1,7 @@
 package com.powerchina.zhixun
 
+import android.util.Log
+
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -42,9 +44,12 @@ class MainActivity : ComponentActivity() {
 
     private fun handleOpenXiaozhiIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_OPEN_XIAOZHI, false) != true) return
+        val wake = intent.getBooleanExtra(EXTRA_WAKE_FROM_VOICE, false)
+        val autoConnect = intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false)
+        Log.i(TAG, "handleOpenXiaozhiIntent wake=$wake autoConnect=$autoConnect")
         XiaozhiAppEvents.requestOpenConversation(
-            autoConnect = intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false),
-            fromVoiceWake = intent.getBooleanExtra(EXTRA_WAKE_FROM_VOICE, false),
+            autoConnect = autoConnect,
+            fromVoiceWake = wake,
         )
     }
 
@@ -63,6 +68,8 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val TAG = "MainActivity"
+
         const val EXTRA_OPEN_XIAOZHI = "extra_open_xiaozhi"
         const val EXTRA_AUTO_CONNECT = "extra_auto_connect"
         const val EXTRA_WAKE_FROM_VOICE = "extra_wake_from_voice"
