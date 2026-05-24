@@ -52,7 +52,13 @@ class ServerWakeDetector(
 
     @Volatile
     private var active = false
+    @Volatile
+    private var streaming = false
+    @Volatile
+    private var startingUp = false
     override val isActive: Boolean get() = active
+    override val isStreaming: Boolean get() = streaming
+    override val isStarting: Boolean get() = active && startingUp && !streaming
 
     private var streamingJob: Job? = null
     private var eventJob: Job? = null
@@ -72,6 +78,8 @@ class ServerWakeDetector(
             return
         }
         active = true
+        startingUp = true
+        streaming = false
         streamGeneration++
         acquireWakeLock()
         registerTextListener()
@@ -85,6 +93,8 @@ class ServerWakeDetector(
         if (!active) return
         Log.d(TAG, "暂停服务端唤醒")
         active = false
+        streaming = false
+        startingUp = false
         streamingJob?.cancel()
         streamingJob = null
         unregisterTextListener()
@@ -95,6 +105,8 @@ class ServerWakeDetector(
     override fun stop() {
         Log.d(TAG, "停止服务端唤醒")
         active = false
+        streaming = false
+        startingUp = false
         streamGeneration++
         unregisterTextListener()
         streamingJob?.cancel()
@@ -107,6 +119,12 @@ class ServerWakeDetector(
         } catch (_: Exception) {
         }
         releaseWakeLock()
+    }
+
+    private fun markStartupFailed() {
+        active = false
+        streaming = false
+        startingUp = false
     }
 
     private fun registerTextListener() {
@@ -140,7 +158,13 @@ class ServerWakeDetector(
 
         if (!active || generation != streamGeneration) return
         if (!connected) {
-            Log.e(TAG, "WebSocket 未连接，服务端唤醒失败 gen=$generation")
+            Log.e(TAG, "WebSocket 未连接，服务端唤醒失败 gen=$generation，稍后重试")
+            if (active && generation == streamGeneration) {
+                delay(2_000)
+                if (active && generation == streamGeneration) {
+                    launchStreaming("connect_retry")
+                }
+            }
             return
         }
 
@@ -190,6 +214,8 @@ class ServerWakeDetector(
     private fun triggerWake() {
         if (!active) return
         active = false
+        streaming = false
+        startingUp = false
         streamGeneration++
         Log.i(TAG, "★ 命中唤醒词「${WakePhraseMatcher.WAKE_PHRASE}」")
         unregisterTextListener()
@@ -207,14 +233,17 @@ class ServerWakeDetector(
 
     private suspend fun streamAudioLoop(generation: Int) {
         stopAudio()
+        streaming = false
         if (!createAudioRecord()) {
             Log.e(TAG, "AudioRecord 创建失败")
+            markStartupFailed()
             return
         }
         try {
             opusEncoder = OpusEncoder(SAMPLE_RATE, 1, FRAME_MS)
         } catch (e: Exception) {
             Log.e(TAG, "OpusEncoder 初始化失败", e)
+            markStartupFailed()
             return
         }
 
@@ -227,6 +256,8 @@ class ServerWakeDetector(
         var lastHeartbeat = System.currentTimeMillis()
 
         audioRecord?.startRecording()
+        streaming = true
+        startingUp = false
         Log.i(TAG, "Opus 推流开始 gen=$generation")
 
         while (active && generation == streamGeneration && scope.isActive) {
@@ -268,6 +299,8 @@ class ServerWakeDetector(
                 }
             }
         }
+        streaming = false
+        startingUp = false
         Log.d(
             TAG,
             "推流结束 gen=$generation frames=$framesSent reason=${if (!active) "paused" else "cancelled"}",
@@ -347,6 +380,10 @@ class ServerWakeDetector(
 
 interface WakeListener {
     val isActive: Boolean
+    /** 是否正在采集/推流 */
+    val isStreaming: Boolean get() = isActive
+    /** 已 start 但尚未推流（连接 WS / 初始化麦克风） */
+    val isStarting: Boolean get() = false
     fun start()
     fun pause()
     fun stop()

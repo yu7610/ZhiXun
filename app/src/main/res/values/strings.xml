@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">智讯</string>
+    <string name="app_name">智询</string>
     <string name="conversation_title">小智</string>
     <string name="status_connecting">连接中…</string>
     <string name="status_disconnected">未连接</string>
@@ -52,7 +52,7 @@
     <string name="dashcam_empty_clips">暂无本地录像</string>
     <string name="dashcam_playback_close">关闭播放</string>
     <string name="wake_notification_channel">语音唤醒</string>
-    <string name="wake_notification_channel_desc">后台监听「你好」</string>
-    <string name="wake_notification_title">小智语音唤醒</string>
-    <string name="wake_notification_text">正在监听：你好（需联网）</string>
+    <string name="wake_notification_channel_desc">后台监听「你好，智询」</string>
+    <string name="wake_notification_title">智询语音唤醒</string>
+    <string name="wake_notification_text">正在监听：你好，智询</string>
 </resources>

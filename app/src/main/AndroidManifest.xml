@@ -60,13 +60,35 @@
             android:foregroundServiceType="microphone" />
 
         <receiver
-            android:name=".dashcam.VideoKeyProbeReceiver"
+            android:name=".physicalkey.RecordKeyBlockReceiver"
             android:exported="true">
             <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.PRESS_RECORD_KEY" />
+                <action android:name="android.intent.action.LONG_PRESS_RECORD_KEY" />
+                <action android:name="intent.action.PRESS_RECORD_KEY" />
+                <action android:name="intent.action.LONG_PRESS_RECORD_KEY" />
+                <action android:name="com.android.intent.action.PRESS_RECORD_KEY" />
+                <action android:name="com.android.intent.action.LONG_PRESS_RECORD_KEY" />
+                <action android:name="android.intent.action.PRESS_AUDIO_KEY" />
+                <action android:name="android.intent.action.LONG_PRESS_AUDIO_KEY" />
+                <action android:name="intent.action.PRESS_AUDIO_KEY" />
+                <action android:name="intent.action.LONG_PRESS_AUDIO_KEY" />
+                <action android:name="android.intent.action.RECORD_KEY_DOWN" />
+                <action android:name="android.intent.action.RECORD_KEY_UP" />
+                <action android:name="com.yulong.action.RECORD_KEY" />
+                <action android:name="com.yulong.action.PRESS_RECORD_KEY" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".dashcam.VideoKeyProbeReceiver"
+            android:exported="true">
+            <intent-filter android:priority="2147483646">
                 <action android:name="android.intent.action.PRESS_VIDEO_KEY" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <intent-filter android:priority="2147483647">
+            <intent-filter android:priority="2147483646">
                 <action android:name="android.intent.action.LONG_PRESS_VIDEO_KEY" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
@@ -75,11 +97,11 @@
         <receiver
             android:name=".dashcam.VideoKeyReceiver"
             android:exported="true">
-            <intent-filter android:priority="2147483646">
+            <intent-filter android:priority="2147483644">
                 <action android:name="android.intent.action.PRESS_VIDEO_KEY" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <intent-filter android:priority="2147483646">
+            <intent-filter android:priority="2147483644">
                 <action android:name="android.intent.action.LONG_PRESS_VIDEO_KEY" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>

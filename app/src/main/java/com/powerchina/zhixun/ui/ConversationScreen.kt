@@ -83,6 +83,7 @@ import com.powerchina.zhixun.data.Message
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.viewmodel.ConversationState
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import java.io.File
 import kotlinx.coroutines.launch
@@ -129,6 +130,9 @@ fun ConversationScreen(
     val messages by viewModel.messages.collectAsState()
     val conversationState by viewModel.state.collectAsState()
     val isConnected by viewModel.isConnected.collectAsState()
+    val isStandbyReady by viewModel.isStandbyReady.collectAsState()
+    val isAwaitingReconnect by viewModel.isAwaitingReconnect.collectAsState()
+    val isSessionConnecting by viewModel.isSessionConnecting.collectAsState()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -149,8 +153,7 @@ fun ConversationScreen(
     LaunchedEffect(permissionsState.allPermissionsGranted) {
         if (permissionsState.allPermissionsGranted) {
             XiaozhiWakeForegroundService.ensureStarted(appContext)
-            viewModel.initializeAudio()
-            viewModel.connect()
+            viewModel.onConversationScreenReady()
         } else {
             permissionsState.launchMultiplePermissionRequest()
         }
@@ -160,6 +163,9 @@ fun ConversationScreen(
         messages = messages,
         conversationState = conversationState,
         isConnected = isConnected,
+        isStandbyReady = isStandbyReady,
+        isAwaitingReconnect = isAwaitingReconnect,
+        isSessionConnecting = isSessionConnecting,
         onShowSettings = onNavigateToSettings,
         onBack = onBack,
         showActivationDialog = showActivationDialog,
@@ -174,6 +180,9 @@ private fun MainConversationContent(
     messages: List<Message>,
     conversationState: ConversationState,
     isConnected: Boolean,
+    isStandbyReady: Boolean,
+    isAwaitingReconnect: Boolean,
+    isSessionConnecting: Boolean,
     onShowSettings: () -> Unit,
     onBack: (() -> Unit)?,
     showActivationDialog: Boolean,
@@ -207,6 +216,9 @@ private fun MainConversationContent(
             TopBar(
                 conversationState = conversationState,
                 isConnected = isConnected,
+                isStandbyReady = isStandbyReady,
+                isAwaitingReconnect = isAwaitingReconnect,
+                isSessionConnecting = isSessionConnecting,
                 onShowSettings = onShowSettings,
                 onLocationClick = onFeatureComing,
                 onScreenRecordClick = onFeatureComing,
@@ -292,12 +304,21 @@ private fun MainConversationContent(
 private fun TopBar(
     conversationState: ConversationState,
     isConnected: Boolean,
+    isStandbyReady: Boolean,
+    isAwaitingReconnect: Boolean,
+    isSessionConnecting: Boolean,
     onShowSettings: () -> Unit,
     onLocationClick: () -> Unit,
     onScreenRecordClick: () -> Unit,
     onBack: (() -> Unit)?,
 ) {
-    val statusText = statusLabel(conversationState, isConnected)
+    val statusText = statusLabel(
+        state = conversationState,
+        isConnected = isConnected,
+        isStandbyReady = isStandbyReady,
+        isAwaitingReconnect = isAwaitingReconnect,
+        isSessionConnecting = isSessionConnecting,
+    )
 
     Box(
         modifier = Modifier
@@ -360,19 +381,24 @@ private fun TopBar(
 }
 
 @Composable
-private fun statusLabel(state: ConversationState, isConnected: Boolean): String {
-    if (!isConnected) {
-        return when (state) {
-            ConversationState.CONNECTING -> stringResource(R.string.status_connecting)
-            else -> stringResource(R.string.status_disconnected)
-        }
-    }
+private fun statusLabel(
+    state: ConversationState,
+    isConnected: Boolean,
+    isStandbyReady: Boolean,
+    isAwaitingReconnect: Boolean,
+    isSessionConnecting: Boolean,
+): String {
     return when (state) {
-        ConversationState.CONNECTING -> stringResource(R.string.status_connecting)
         ConversationState.LISTENING -> stringResource(R.string.status_listening)
         ConversationState.PROCESSING -> stringResource(R.string.status_processing)
         ConversationState.SPEAKING -> stringResource(R.string.status_speaking)
-        ConversationState.IDLE -> stringResource(R.string.status_standby)
+        ConversationState.CONNECTING -> stringResource(R.string.status_connecting)
+        ConversationState.IDLE -> when {
+            isAwaitingReconnect || isSessionConnecting -> stringResource(R.string.status_connecting)
+            !isConnected -> stringResource(R.string.status_disconnected)
+            isStandbyReady -> stringResource(R.string.status_standby)
+            else -> stringResource(R.string.status_connecting)
+        }
     }
 }
 

@@ -19,6 +19,13 @@ class PhysicalKeyWindowCallback(
         return delegate.dispatchKeyEvent(event)
     }
 
+    override fun dispatchKeyShortcutEvent(event: KeyEvent): Boolean {
+        if (PhysicalKeyInterceptor.dispatchKeyEvent(activity, event)) {
+            return true
+        }
+        return delegate.dispatchKeyShortcutEvent(event)
+    }
+
     companion object {
         fun install(activity: Activity) {
             val window = activity.window

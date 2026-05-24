@@ -62,7 +62,20 @@ class XiaozhiSessionManager private constructor(
                         _isConnected.value = false
                         _isConnecting.value = false
                         XiaozhiVisionRegistry.clear()
-                        Log.i(TAG, "WebSocket Disconnected")
+                        if (!webSocketManager.isAutoReconnectEnabled()) {
+                            Log.i(TAG, "WebSocket Disconnected，已禁止自动重连")
+                            return@collect
+                        }
+                        Log.i(TAG, "WebSocket Disconnected，尝试恢复连接")
+                        scope.launch {
+                            delay(2_500)
+                            if (!webSocketManager.isConnected() &&
+                                webSocketManager.isAutoReconnectEnabled() &&
+                                isNetworkConfigReady()
+                            ) {
+                                ensureConnected()
+                            }
+                        }
                     }
                     is WebSocketEvent.Error -> {
                         _isConnecting.value = false
@@ -147,8 +160,12 @@ class XiaozhiSessionManager private constructor(
         _activationCode.value = null
     }
 
+    /** 关闭当前连接但保留参数，便于立即重连（配置刷新等场景） */
     fun disconnect() {
-        webSocketManager.disconnect()
+        webSocketManager.disconnect(
+            disableAutoReconnect = false,
+            clearCredentials = false,
+        )
         _isConnected.value = false
         _isConnecting.value = false
     }
@@ -156,7 +173,12 @@ class XiaozhiSessionManager private constructor(
     /** 应用关闭：断开 WebSocket 并禁止自动重连 */
     fun shutdown() {
         webSocketManager.disableReconnect()
-        disconnect()
+        webSocketManager.disconnect(
+            disableAutoReconnect = true,
+            clearCredentials = true,
+        )
+        _isConnected.value = false
+        _isConnecting.value = false
         _lastError.value = null
         Log.i(TAG, "shutdown: 小智会话已关闭")
     }

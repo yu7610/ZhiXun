@@ -85,17 +85,25 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
             XiaozhiAppEvents.requests.collect { req ->
                 Log.i(
                     TAG,
-                    "收到打开对话请求 wake=${req.fromVoiceWake} autoConnect=${req.autoConnect}",
+                    "收到打开对话请求 wake=${req.fromVoiceWake} autoConnect=${req.autoConnect} " +
+                        "voiceKey=${req.startVoiceOnConnect}",
                 )
                 val cfg = configManager.loadConfig()
                 if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
                     Log.w(TAG, "未配置，跳转设置页")
                     navController.navigate(AppRoutes.Settings)
                 } else {
-                    conversationViewModel.updateConfig(cfg)
-                    sessionManager.ensureConnected()
-                    if (req.fromVoiceWake) {
-                        conversationViewModel.onVoiceWakeDetected()
+                    when {
+                        req.startVoiceOnConnect -> {
+                            sessionManager.ensureConnected()
+                            conversationViewModel.onRecordKeyPressed()
+                        }
+                        req.fromVoiceWake -> {
+                            conversationViewModel.updateConfig(cfg)
+                            sessionManager.ensureConnected()
+                            conversationViewModel.onVoiceWakeDetected()
+                        }
+                        req.autoConnect -> sessionManager.ensureConnected()
                     }
                     if (navController.currentDestination?.route != AppRoutes.Conversation) {
                         Log.d(TAG, "导航到对话页")

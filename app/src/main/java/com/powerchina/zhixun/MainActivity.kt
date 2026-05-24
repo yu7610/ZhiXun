@@ -42,15 +42,30 @@ class MainActivity : ComponentActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.onKeyUp(keyCode, event)
+    }
+
     private fun handleOpenXiaozhiIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_OPEN_XIAOZHI, false) != true) return
         val wake = intent.getBooleanExtra(EXTRA_WAKE_FROM_VOICE, false)
         val autoConnect = intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false)
-        Log.i(TAG, "handleOpenXiaozhiIntent wake=$wake autoConnect=$autoConnect")
-        XiaozhiAppEvents.requestOpenConversation(
-            autoConnect = autoConnect,
-            fromVoiceWake = wake,
-        )
+        val startVoice = intent.getBooleanExtra(EXTRA_START_VOICE, false)
+        Log.i(TAG, "handleOpenXiaozhiIntent wake=$wake autoConnect=$autoConnect voice=$startVoice")
+        if (startVoice) {
+            XiaozhiAppEvents.requestVoiceConversation()
+        } else {
+            XiaozhiAppEvents.requestOpenConversation(
+                autoConnect = autoConnect,
+                fromVoiceWake = wake,
+            )
+        }
     }
 
     private fun applyVoiceWakeWindowFlags(intent: Intent?) {
@@ -73,5 +88,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_OPEN_XIAOZHI = "extra_open_xiaozhi"
         const val EXTRA_AUTO_CONNECT = "extra_auto_connect"
         const val EXTRA_WAKE_FROM_VOICE = "extra_wake_from_voice"
+        const val EXTRA_START_VOICE = "extra_start_voice"
     }
 }

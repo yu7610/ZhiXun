@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 data class OpenConversationRequest(
     val autoConnect: Boolean = false,
     val fromVoiceWake: Boolean = false,
+    /** 物理录音键：连接成功后自动开麦 */
+    val startVoiceOnConnect: Boolean = false,
 )
 
 data class PhotoResult(
@@ -24,7 +26,10 @@ data class PhotoResult(
 object XiaozhiAppEvents {
     private const val TAG = "AppEvents"
 
-    private val _requests = MutableSharedFlow<OpenConversationRequest>(extraBufferCapacity = 1)
+    private val _requests = MutableSharedFlow<OpenConversationRequest>(
+        replay = 1,
+        extraBufferCapacity = 1,
+    )
     val requests: SharedFlow<OpenConversationRequest> = _requests.asSharedFlow()
 
     private val _photoCaptureRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -42,6 +47,46 @@ object XiaozhiAppEvents {
     @Volatile
     var pendingAutoConnect: Boolean = false
         private set
+
+    /** 物理录音键待开麦（SharedFlow 丢失时兜底） */
+    @Volatile
+    var pendingVoiceKeyPress: Boolean = false
+        private set
+
+    @Volatile
+    private var voiceKeyEpoch: Long = 0L
+
+    @Volatile
+    private var lastConsumedVoiceKeyEpoch: Long = -1L
+
+    fun markPendingVoiceKeyPress() {
+        pendingVoiceKeyPress = true
+        Log.i(TAG, "markPendingVoiceKeyPress")
+    }
+
+    fun clearPendingVoiceKeyPress() {
+        pendingVoiceKeyPress = false
+    }
+
+    fun hasPendingVoiceKeyPress(): Boolean = pendingVoiceKeyPress
+
+    /**
+     * 消费一次语音键事件。同一按压若被 NavHost / ViewModel 重复投递，仅第一次生效。
+     */
+    fun consumeVoiceKeyPressEvent(): Boolean {
+        if (voiceKeyEpoch == lastConsumedVoiceKeyEpoch) {
+            return false
+        }
+        lastConsumedVoiceKeyEpoch = voiceKeyEpoch
+        pendingVoiceKeyPress = false
+        return true
+    }
+
+    /** 结束对话等路径：同步 epoch，避免下一次按键被误判为重复 */
+    fun acknowledgeVoiceKeyEvent() {
+        lastConsumedVoiceKeyEpoch = voiceKeyEpoch
+        pendingVoiceKeyPress = false
+    }
 
     /** 拍照上传/等待小智视觉回复期间，禁止恢复后台唤醒监听 */
     @Volatile
@@ -61,18 +106,30 @@ object XiaozhiAppEvents {
 
     fun isPhotoSessionActive(): Boolean = photoSessionActive
 
-    fun requestOpenConversation(autoConnect: Boolean = false, fromVoiceWake: Boolean = false) {
-        if (autoConnect || fromVoiceWake) pendingAutoConnect = true
+    fun requestOpenConversation(
+        autoConnect: Boolean = false,
+        fromVoiceWake: Boolean = false,
+        startVoiceOnConnect: Boolean = false,
+    ) {
+        if (autoConnect || fromVoiceWake || startVoiceOnConnect) pendingAutoConnect = true
         val emitted = _requests.tryEmit(
             OpenConversationRequest(
                 autoConnect = autoConnect,
                 fromVoiceWake = fromVoiceWake,
+                startVoiceOnConnect = startVoiceOnConnect,
             ),
         )
         Log.i(
             TAG,
-            "requestOpenConversation autoConnect=$autoConnect wake=$fromVoiceWake emitted=$emitted",
+            "requestOpenConversation autoConnect=$autoConnect wake=$fromVoiceWake " +
+                "voiceKey=$startVoiceOnConnect emitted=$emitted",
         )
+    }
+
+    fun requestVoiceConversation() {
+        voiceKeyEpoch++
+        pendingVoiceKeyPress = true
+        requestOpenConversation(autoConnect = true, startVoiceOnConnect = true)
     }
 
     fun requestPhotoCapture() {

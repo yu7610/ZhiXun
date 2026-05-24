@@ -146,7 +146,14 @@ class WebSocketManager(private val context: Context) {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (isStale()) return
-                Log.d(TAG, "收到文本消息: $text")
+                val isMcp = try {
+                    gson.fromJson(text, JsonObject::class.java).get("type")?.asString == "mcp"
+                } catch (_: Exception) {
+                    false
+                }
+                if (!isMcp) {
+                    Log.d(TAG, "收到文本消息: $text")
+                }
                 textMessageListeners.forEach { listener ->
                     try {
                         listener(text)
@@ -317,8 +324,15 @@ class WebSocketManager(private val context: Context) {
             if (!isHandshakeComplete) {
                 Log.e(TAG, "Hello握手超时")
                 connectInProgress = false
-                _events.emit(WebSocketEvent.Error("握手超时"))
-                disconnect()
+                scope.launch {
+                    _events.emit(WebSocketEvent.Error("握手超时"))
+                }
+                webSocket?.cancel()
+                webSocket = null
+                isConnected = false
+                isHandshakeComplete = false
+                sessionId = null
+                reconnectAfterDisconnect()
             }
         }
     }
@@ -592,7 +606,6 @@ class WebSocketManager(private val context: Context) {
                     "result",
                     JsonObject().apply {
                         add("tools", tools)
-                        addProperty("nextCursor", "")
                     },
                 )
             },
@@ -626,11 +639,19 @@ class WebSocketManager(private val context: Context) {
 
     /**
      * 断开连接
+     *
+     * @param disableAutoReconnect 是否禁止后续自动重连（应用退出、用户主动断开）
+     * @param clearCredentials 是否清除连接参数（完全关闭时使用）
      */
-    fun disconnect() {
-        shouldReconnect = false
-        reconnectJob?.cancel()
-        reconnectScheduled = false
+    fun disconnect(
+        disableAutoReconnect: Boolean = true,
+        clearCredentials: Boolean = disableAutoReconnect,
+    ) {
+        if (disableAutoReconnect) {
+            shouldReconnect = false
+            reconnectJob?.cancel()
+            reconnectScheduled = false
+        }
         connectInProgress = false
         connectionGeneration++
         helloTimeoutJob?.cancel()
@@ -640,13 +661,18 @@ class WebSocketManager(private val context: Context) {
         isConnected = false
         isHandshakeComplete = false
         sessionId = null
-        lastUrl = null
-        lastDeviceId = null
-        lastToken = null
+        if (clearCredentials) {
+            lastUrl = null
+            lastDeviceId = null
+            lastToken = null
+        }
         if (wasActive) {
             scope.launch { _events.emit(WebSocketEvent.Disconnected) }
         }
     }
+
+    /** 是否允许在断线后自动重连 */
+    fun isAutoReconnectEnabled(): Boolean = shouldReconnect
 
     /**
      * 检查连接状态

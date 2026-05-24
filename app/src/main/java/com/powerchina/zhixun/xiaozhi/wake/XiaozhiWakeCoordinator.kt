@@ -9,6 +9,8 @@ import android.os.Looper
 import android.os.PowerManager
 import com.powerchina.zhixun.MainActivity
 import com.powerchina.zhixun.data.ConfigManager
+import com.powerchina.zhixun.physicalkey.PhysicalKeyInterceptor
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 
 /**
@@ -78,6 +80,15 @@ object XiaozhiWakeCoordinator {
 
         val app = appContext as android.app.Application
         XiaozhiSessionManager.getInstance(app).ensureConnected()
+
+        if (PhysicalKeyInterceptor.isAppInForeground) {
+            Log.i(TAG, "应用在前台，通过 AppEvents 打开对话")
+            XiaozhiAppEvents.requestOpenConversation(
+                autoConnect = true,
+                fromVoiceWake = true,
+            )
+            return
+        }
 
         val launchIntent = Intent(appContext, MainActivity::class.java).apply {
             addFlags(

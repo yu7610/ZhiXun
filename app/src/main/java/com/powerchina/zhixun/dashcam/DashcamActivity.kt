@@ -25,4 +25,14 @@ class DashcamActivity : ComponentActivity() {
         if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
         return super.dispatchKeyEvent(event)
     }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.onKeyUp(keyCode, event)
+    }
 }

@@ -28,12 +28,18 @@ object PhysicalKeyLifecycle {
                 PhysicalKeyWindowCallback.install(activity)
             }
 
+            override fun onActivityResumed(activity: Activity) {
+                // Compose/ComponentActivity 可能重置 Window.Callback，每次 Resume 重新安装
+                PhysicalKeyWindowCallback.install(activity)
+            }
+
             override fun onActivityStarted(activity: Activity) = Unit
-            override fun onActivityResumed(activity: Activity) = Unit
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivityStopped(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
         })
+
+        RecordKeyRegistrar.register(application)
     }
 }

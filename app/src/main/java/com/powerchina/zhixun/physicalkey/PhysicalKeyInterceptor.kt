@@ -33,6 +33,10 @@ object PhysicalKeyInterceptor {
         if (!shouldInterceptKeyEvent(event)) return false
 
         val keyCode = event.keyCode
+        val scanCode = event.scanCode
+        if (PhysicalKeyCodes.isRecordKey(keyCode, scanCode)) {
+            return dispatchBlockedKeyEvent(context, event)
+        }
         if (PhysicalKeyCodes.isMappedKey(keyCode)) {
             return dispatchMappedKeyEvent(context, event)
         }
@@ -84,6 +88,27 @@ object PhysicalKeyInterceptor {
         return true
     }
 
+    /** keyCode=138（KEYCODE_F7）录音键：待机/断开时连接并开麦 */
+    private fun dispatchBlockedKeyEvent(context: Context, event: KeyEvent): Boolean {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    Log.i(
+                        TAG,
+                        "录音键按下 keyCode=${event.keyCode} " +
+                            "(${KeyEvent.keyCodeToString(event.keyCode)}) scanCode=${event.scanCode}",
+                    )
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                RecordKeyHandler.handleKeyUp(context)
+                return true
+            }
+        }
+        return true
+    }
+
     /** 其它录像相关键：保留短按/长按兼容 */
     private fun dispatchLegacyVideoKeyEvent(context: Context, event: KeyEvent): Boolean {
         // 未映射的 legacy 键仅消费，避免触发系统行为
@@ -107,9 +132,11 @@ object PhysicalKeyInterceptor {
         if (keyCode in PASSTHROUGH_KEY_CODES) return false
 
         if (PhysicalKeyCodes.isMappedKey(keyCode)) return true
+        if (PhysicalKeyCodes.isRecordKey(keyCode, event.scanCode)) return true
         if (isLegacyVideoRelatedKey(keyCode)) return true
         if (keyCode in HARDWARE_KEY_CODES) return true
 
+        if (PhysicalKeyCodes.isRecordKey(keyCode, event.scanCode)) return true
         if (keyCode == KeyEvent.KEYCODE_UNKNOWN && event.scanCode != 0) return true
 
         if (event.isFromSource(InputDevice.SOURCE_KEYBOARD) &&
@@ -167,6 +194,7 @@ object PhysicalKeyInterceptor {
         KeyEvent.KEYCODE_MEDIA_STOP,
         KeyEvent.KEYCODE_MEDIA_NEXT,
         KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+        PhysicalKeyCodes.SYSTEM_BLOCK,
         230,
         131, 132, 133, 134, 135,
     )

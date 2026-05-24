@@ -86,6 +86,29 @@ class EnhancedAudioManager(private val context: Context) {
     }
 
     /**
+     * 仅初始化播放链路（Opus 解码 + 播放），不占用麦克风。
+     * 对话页待机且唤醒服务监听时使用。
+     */
+    fun initializePlaybackOnly(): Boolean {
+        return try {
+            if (opusDecoder == null) {
+                opusDecoder = OpusDecoder(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS)
+            }
+            if (streamPlayer == null) {
+                streamPlayer = OpusStreamPlayer(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS, context)
+            }
+            setupAudioPlayback()
+            Log.d(TAG, "播放链路初始化成功（未占用麦克风）")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "播放链路初始化失败", e)
+            false
+        }
+    }
+
+    fun isPlaybackReady(): Boolean = opusDecoder != null && streamPlayer != null
+
+    /**
      * 设置录音器
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)

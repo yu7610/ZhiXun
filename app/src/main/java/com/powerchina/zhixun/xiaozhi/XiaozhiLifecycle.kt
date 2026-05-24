@@ -9,7 +9,7 @@ import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /**
- * 应用进入前台时连接小智，退到后台/关闭时断开并停止服务。
+ * 应用生命周期：前台保持/恢复连接，退后台也不断开 WebSocket。
  */
 object XiaozhiLifecycle {
 
@@ -18,22 +18,22 @@ object XiaozhiLifecycle {
     fun register(application: Application) {
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
-                Log.d(TAG, "应用进入前台 → ensureConnected")
+                Log.d(TAG, "应用进入前台 → ensureConnected + 唤醒监听")
                 XiaozhiSessionManager.getInstance(application).ensureConnected()
+                if (!XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
+                    XiaozhiWakeForegroundService.ensureListeningActive(application)
+                }
             }
 
             override fun onStop(owner: LifecycleOwner) {
-                if (XiaozhiWakeForegroundService.isRunning()) {
-                    Log.d(TAG, "应用进入后台，唤醒服务运行中 → 保持 WebSocket + 唤醒")
-                    if (!XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
-                        XiaozhiWakeForegroundService.ensureListeningActive(application)
-                    } else {
-                        Log.d(TAG, "唤醒交接中，不恢复后台监听")
-                    }
+                Log.d(TAG, "应用进入后台，保持 WebSocket 连接")
+                XiaozhiSessionManager.getInstance(application).ensureConnected()
+                if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
+                    Log.d(TAG, "唤醒交接中，不恢复后台监听")
                     return
                 }
-                Log.d(TAG, "应用进入后台，无唤醒服务 → shutdown")
-                shutdown(application)
+                XiaozhiWakeForegroundService.ensureStarted(application)
+                XiaozhiWakeForegroundService.ensureListeningActive(application)
             }
         })
     }

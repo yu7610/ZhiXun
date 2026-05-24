@@ -20,7 +20,7 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         PhysicalKeyLifecycle.register(this)
         Log.i(
             VideoKeyReceiver.TAG,
-            "物理键拦截已启用 (前台拦截 + 广播 + KeyEvent)",
+            "物理键拦截已启用 (KeyEvent + 录音键广播 + 录像键广播)",
         )
         VideoKeyRegistrar.register(this)
         VideoKeyHandler.logTestCommands(this)
