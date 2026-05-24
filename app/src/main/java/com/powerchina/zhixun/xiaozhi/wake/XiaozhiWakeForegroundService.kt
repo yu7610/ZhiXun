@@ -20,6 +20,7 @@ import com.powerchina.zhixun.MainActivity
 import com.powerchina.zhixun.R
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
+import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 /**
  * 后台/息屏持续监听「你好，智询」的前台服务。
  */
@@ -139,6 +140,11 @@ class XiaozhiWakeForegroundService : Service() {
             Log.d(TAG, "已在运行，跳过")
             return
         }
+        if (listener is ServerWakeDetector && listener.canQuickResume()) {
+            Log.i(TAG, "快速恢复唤醒监听")
+            listener.resume()
+            return
+        }
         Log.i(TAG, "启动唤醒监听")
         listener.start()
     }
@@ -235,14 +241,17 @@ class XiaozhiWakeForegroundService : Service() {
         fun ensureListeningActive(context: Context) {
             val appContext = context.applicationContext
             if (micClaimedByConversation) {
+                VoiceFlowLog.decision("wakeService.ensure", "恢复监听", false, "micClaimedByConversation")
                 Log.d(TAG, "对话占用麦克风，不恢复唤醒监听")
                 return
             }
             if (XiaozhiAppEvents.isPhotoSessionActive()) {
+                VoiceFlowLog.decision("wakeService.ensure", "恢复监听", false, "photoSession")
                 Log.d(TAG, "拍照会话中，不恢复监听")
                 return
             }
             if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
+                VoiceFlowLog.decision("wakeService.ensure", "恢复监听", false, "coordHandoff")
                 Log.d(TAG, "唤醒交接中，不恢复监听")
                 return
             }
@@ -252,17 +261,33 @@ class XiaozhiWakeForegroundService : Service() {
                 val listener = service.wakeListener
                 when {
                     listener?.isStreaming == true -> {
+                        VoiceFlowLog.step("wakeService.ensure", "已在推流，跳过")
                         Log.d(TAG, "监听已活跃且正在推流")
                         return
                     }
                     listener?.isStarting == true -> {
+                        VoiceFlowLog.step("wakeService.ensure", "启动中，跳过")
                         Log.d(TAG, "监听启动中，不重启")
                         return
                     }
+                    listener is ServerWakeDetector && listener.canQuickResume() -> {
+                        VoiceFlowLog.snapshot("wakeService.ensure", "path=quickResume")
+                        Log.i(TAG, "ensureListeningActive 快速恢复")
+                        listener.resume()
+                        return
+                    }
+                    listener != null && !listener.isActive && !listener.isStreaming -> {
+                        VoiceFlowLog.snapshot("wakeService.ensure", "path=resumePaused")
+                        Log.i(TAG, "ensureListeningActive 恢复已暂停监听")
+                        service.startDetector()
+                        return
+                    }
                     listener?.isActive == true -> {
+                        VoiceFlowLog.warn("wakeService.ensure", "假活跃(未推流)，将重启")
                         Log.w(TAG, "监听假活跃（未推流），重启")
                     }
                 }
+                VoiceFlowLog.snapshot("wakeService.ensure", "path=fullRestart")
                 service.wakeListener?.stop()
                 service.wakeListener = null
                 Log.i(TAG, "ensureListeningActive 重启监听")
@@ -273,10 +298,10 @@ class XiaozhiWakeForegroundService : Service() {
         fun releaseMicrophoneForConversation(context: Context) {
             val appContext = context.applicationContext
             Log.d(TAG, "releaseMicrophoneForConversation")
+            VoiceFlowLog.step("wakeService.mic", "releaseForConversation pauseListener")
             instance?.let { service ->
                 service.pausedByConversation = true
-                service.wakeListener?.stop()
-                service.wakeListener = null
+                service.wakeListener?.pause()
             }
             appContext.startService(
                 Intent(appContext, XiaozhiWakeForegroundService::class.java).apply {
@@ -285,15 +310,45 @@ class XiaozhiWakeForegroundService : Service() {
             )
         }
 
+        /** 结束语播放期间预初始化麦克风，缩短退下后恢复唤醒时间 */
+        fun prepareWakeAudioCapture(context: Context) {
+            if (micClaimedByConversation) {
+                VoiceFlowLog.decision("wakeService.preAudio", "预创建", false, "micClaimed")
+                return
+            }
+            if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
+                VoiceFlowLog.decision("wakeService.preAudio", "预创建", false, "coordHandoff")
+                return
+            }
+            val appContext = context.applicationContext
+            if (!hasMicPermission(appContext)) {
+                VoiceFlowLog.decision("wakeService.preAudio", "预创建", false, "noMicPermission")
+                return
+            }
+            VoiceFlowLog.step("wakeService.preAudio", "开始预创建 AudioRecord")
+            ensureStarted(appContext)
+            instance?.let { service ->
+                if (service.pausedByConversation) {
+                    service.pausedByConversation = false
+                }
+                val listener = service.ensureWakeListener()
+                if (listener is ServerWakeDetector) {
+                    listener.prepareAudioCapture()
+                }
+            }
+        }
+
         /** 对话开麦前声明占用，防止待机逻辑把麦克风抢回唤醒服务 */
         fun claimMicrophoneForConversation(context: Context) {
             micClaimedByConversation = true
+            VoiceFlowLog.step("wakeService.mic", "claimForConversation")
             releaseMicrophoneForConversation(context)
         }
 
         fun releaseConversationMicrophoneClaim(context: Context) {
             if (!micClaimedByConversation) return
             micClaimedByConversation = false
+            VoiceFlowLog.step("wakeService.mic", "releaseConversationClaim")
             Log.d(TAG, "releaseConversationMicrophoneClaim")
         }
 

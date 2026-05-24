@@ -42,7 +42,11 @@ object WakePhraseMatcher {
     fun isSessionEndPhrase(text: String): Boolean {
         val normalized = normalize(text)
         if (normalized.isEmpty()) return false
-        return SESSION_END_KEYWORDS.any { normalized.contains(it) }
+        if (SESSION_END_KEYWORDS.any { normalized.contains(it) }) return true
+        // STT 同音误识：特下、退休
+        if (normalized.matches(Regex("^[退特]下[啊吗呀呢]?$"))) return true
+        if (normalized.contains("退休")) return true
+        return false
     }
 
     private val SESSION_END_KEYWORDS = listOf(

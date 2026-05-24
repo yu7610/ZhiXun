@@ -115,6 +115,13 @@ OTA（可选）→ 取得 wss URL → WebSocketManager.connect(url, deviceId, to
 
 - WebSocket **二进制帧** → `BinaryMessage` → `audioManager.playAudio`
 - 解码：`OpusDecoder` → `AudioTrack` 播放
+- **仅在对话态播放**（`SPEAKING` / `LISTENING` / `PROCESSING`）；`IDLE` 收到的二进制帧视为 abort 后迟回，丢弃
+- **唤醒问候窗口**（detect 后约 15s）：允许在 `IDLE`/`LISTENING` 播放问候 TTS，不切 `SPEAKING`、不打断开麦
+
+### 6.3 Listen 会话续期
+
+- 服务端 listen 会话约 **30s** 超时
+- 待机唤醒（`ServerWakeDetector`）与对话聆听（`ConversationViewModel`）均每 **12s** 发送 `listen/stop` + `listen/start` 续期
 
 ## 7. 典型对话流程
 
@@ -124,8 +131,10 @@ connect → hello 握手 → Connected
   → stt → PROCESSING
   → tts start → SPEAKING → 二进制下行播放
   → tts stop → 自动模式 startNextRound() 或 IDLE
-disconnect / 错误 → Disconnected
+disconnect / 错误 → Disconnected（对话中自动重连并恢复开麦，不进入待机）
 ```
+
+**断线恢复（对话中）**：`LISTENING`/`PROCESSING`/`SPEAKING` + 自动模式 → `CONNECTING` + `pendingAutoStart`，重连后 `initializeAudio()` 恢复聆听。
 
 ## 8. 与 OTA 的关系
 

@@ -17,6 +17,7 @@ import com.powerchina.zhixun.network.WebSocketEvent
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.PhotoResult
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
+import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 import com.powerchina.zhixun.xiaozhi.wake.WakePhraseMatcher
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
@@ -46,7 +47,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         private const val TAG = "ConversationViewModel"
         /** 说「退下」后过滤服务器回复：adb logcat -s SessionEndReply */
         private const val SESSION_END_TAG = "SessionEndReply"
-        private const val SPEAKING_WATCHDOG_MS = 45_000L
+        /** 全流程诊断：adb logcat -s VoiceFlow */
+        private const val SPEAKING_WATCHDOG_MS = 20_000L
+        private const val SPEAKING_NO_AUDIO_MS = 3_000L
+        /** detect 后忽略服务器问候 TTS，避免卡在「回复中」（服务器回显可能延迟 10s+） */
+        private const val WAKE_GREETING_SUPPRESS_MS = 15_000L
+        /** 服务端 listen 会话约 30s 超时，对话聆听中需 stop+start 续期（与 WakeSTT 一致） */
+        private const val LISTEN_KEEPALIVE_INTERVAL_MS = 12_000L
 
         private val ASSISTANT_TOOL_MARKER = Regex(
             """%\s*get_weather(?:\{[^}]*\}|[^\u4e00-\u9fff%]*)""",
@@ -82,6 +89,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     /** 断线后等待自动重连（此期间 UI 不显示待机） */
     private val _isAwaitingReconnect = MutableStateFlow(false)
     val isAwaitingReconnect: StateFlow<Boolean> = _isAwaitingReconnect.asStateFlow()
+
+    /** 唤醒问候 TTS 播放中（状态仍为 LISTENING，UI 显示「回复中」） */
+    private val _isWakeGreetingPlaying = MutableStateFlow(false)
+    val isWakeGreetingPlaying: StateFlow<Boolean> = _isWakeGreetingPlaying.asStateFlow()
 
     val isSessionConnecting: StateFlow<Boolean> = sessionManager.isConnecting
 
@@ -132,7 +143,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private var speakingWatchdogJob: Job? = null
     private var listenHandoffJob: Job? = null
+    private var listeningKeepaliveJob: Job? = null
     private var hasLoggedFirstAudioFrame = false
+
+    /** 语音唤醒 → 对话开麦交接中，忽略服务器 TTS/STT 回显 */
+    private var wakeConversationHandoff = false
+    /** detect 后短暂忽略服务器问候 TTS/LLM，保持聆听态 */
+    private var suppressWakeGreetingUntilMs = 0L
 
     /** 用户说了「退下」等：等待服务器回复 TTS，播完后再待机；此期间不主动 stopListening/断连 */
     private var pendingSessionEnd = false
@@ -302,17 +319,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     /** 待机可显示：已连接 + 唤醒推流正常 + 无对话/交接占用 + 非重连中 */
     private fun updateStandbyReady() {
-        val ready = conversationUiActive &&
-            _isConnected.value &&
-            !_isAwaitingReconnect.value &&
-            _state.value == ConversationState.IDLE &&
-            !pendingVoiceWake &&
-            !isAutoMode &&
-            !pendingSessionEnd &&
-            !XiaozhiWakeCoordinator.isWakeHandoffInProgress() &&
-            !XiaozhiWakeForegroundService.isConversationMicClaimed() &&
-            listenHandoffJob?.isActive != true &&
-            XiaozhiWakeForegroundService.isWakeListeningHealthy()
+        val blockers = standbyReadyBlockers()
+        val ready = blockers.isEmpty()
         if (_isStandbyReady.value != ready) {
             _isStandbyReady.value = ready
             Log.d(
@@ -320,20 +328,175 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 "standbyReady=$ready connected=${_isConnected.value} " +
                     "wake=${XiaozhiWakeForegroundService.isWakeListeningHealthy()}",
             )
+            VoiceFlowLog.snapshot(
+                "standbyReady=$ready",
+                "blockers=${blockers.joinToString(", ").ifBlank { "无" }} | ${flowContext()}",
+            )
         }
+    }
+
+    private fun standbyReadyBlockers(): List<String> {
+        val blockers = mutableListOf<String>()
+        if (!conversationUiActive) blockers.add("uiInactive")
+        if (!_isConnected.value) blockers.add("disconnected")
+        if (_isAwaitingReconnect.value) blockers.add("awaitingReconnect")
+        if (_state.value != ConversationState.IDLE) blockers.add("state=${_state.value}")
+        if (pendingVoiceWake) blockers.add("pendingWake")
+        if (isAutoMode) blockers.add("autoMode")
+        if (pendingSessionEnd) blockers.add("pendingSessionEnd")
+        if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) blockers.add("coordHandoff")
+        if (XiaozhiWakeForegroundService.isConversationMicClaimed()) blockers.add("micClaimed")
+        if (listenHandoffJob?.isActive == true) blockers.add("listenHandoff")
+        if (!XiaozhiWakeForegroundService.isWakeListeningHealthy()) blockers.add("wakeNotHealthy")
+        return blockers
+    }
+
+    /** 一行看清当前语音链路全部关键标志 */
+    private fun flowContext(): String = buildString {
+        append("state=${_state.value}")
+        append(" conn=${_isConnected.value}")
+        append(" auto=$isAutoMode")
+        append(" pendingWake=$pendingVoiceWake")
+        append(" pendingEnd=$pendingSessionEnd")
+        append(" vmHandoff=$wakeConversationHandoff")
+        append(" coordHandoff=${XiaozhiWakeCoordinator.isWakeHandoffInProgress()}")
+        append(" greetWindow=${isWakeGreetingWindow()}")
+        append(" greetPlay=${_isWakeGreetingPlaying.value}")
+        val greetLeft = suppressWakeGreetingUntilMs - System.currentTimeMillis()
+        if (greetLeft > 0) append(" greetLeft=${greetLeft}ms")
+        append(" listenHandoff=${listenHandoffJob?.isActive == true}")
+        append(" micClaim=${XiaozhiWakeForegroundService.isConversationMicClaimed()}")
+        append(" wakeHealthy=${XiaozhiWakeForegroundService.isWakeListeningHealthy()}")
+        append(" wakeActive=${XiaozhiWakeForegroundService.isWakeListeningActive()}")
+        append(" rec=${audioManager.isRecording()}")
+        append(" play=${audioManager.isPlaying()}")
+        append(" standby=${_isStandbyReady.value}")
+        append(" reconnect=${_isAwaitingReconnect.value}")
+    }
+
+    private fun logFlow(event: String, detail: String = "") {
+        VoiceFlowLog.snapshot(event, if (detail.isBlank()) flowContext() else "$detail | ${flowContext()}")
+    }
+
+    private fun transitionState(to: ConversationState, reason: String) {
+        val from = _state.value
+        if (from == to) return
+        _state.value = to
+        if (to == ConversationState.LISTENING && isAutoMode) {
+            startListeningKeepalive()
+        } else if (from == ConversationState.LISTENING && to != ConversationState.LISTENING) {
+            stopListeningKeepalive()
+        }
+        VoiceFlowLog.transition("state", from.name, to.name, reason, flowContext())
+    }
+
+    private fun isActivelyInConversation(): Boolean {
+        return _state.value == ConversationState.LISTENING ||
+            _state.value == ConversationState.PROCESSING ||
+            _state.value == ConversationState.SPEAKING ||
+            pendingSessionEnd
+    }
+
+    /** 已在开麦聆听时收到的 TTS/音频多为上一轮 abort 后的迟来回显 */
+    private fun shouldIgnoreStaleReplyWhileListening(): Boolean {
+        return _state.value == ConversationState.LISTENING &&
+            isAutoMode &&
+            audioManager.isRecording() &&
+            !pendingSessionEnd &&
+            !isWakeGreetingWindow() &&
+            !_isWakeGreetingPlaying.value
+    }
+
+    private fun isWakeHandoffInProgress(): Boolean {
+        return wakeConversationHandoff ||
+            pendingVoiceWake ||
+            listenHandoffJob?.isActive == true ||
+            XiaozhiWakeCoordinator.isWakeHandoffInProgress()
+    }
+
+    private fun setWakeGreetingPlaying(playing: Boolean) {
+        if (_isWakeGreetingPlaying.value == playing) return
+        _isWakeGreetingPlaying.value = playing
+        VoiceFlowLog.step("wake.greetingPlay", "playing=$playing")
+    }
+
+    private fun isLikelyEmotionOnly(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return true
+        return trimmed.none { it in '\u4e00'..'\u9fff' || it.isLetter() }
+    }
+
+    /** 下行 TTS：对话态直接播放；唤醒问候窗口内 IDLE 也播放（开麦交接期间） */
+    private fun shouldPlayDownlinkAudio(): Boolean {
+        if (isWakeGreetingWindow()) {
+            return _state.value != ConversationState.CONNECTING
+        }
+        return when (_state.value) {
+            ConversationState.SPEAKING,
+            ConversationState.LISTENING,
+            ConversationState.PROCESSING -> true
+            else -> false
+        }
+    }
+
+    private fun startListeningKeepalive() {
+        listeningKeepaliveJob?.cancel()
+        listeningKeepaliveJob = viewModelScope.launch {
+            var lastRenew = System.currentTimeMillis()
+            while (true) {
+                delay(1_000)
+                if (_state.value != ConversationState.LISTENING ||
+                    !isAutoMode ||
+                    !audioManager.isRecording() ||
+                    !_isConnected.value ||
+                    isWakeGreetingWindow() ||
+                    _isWakeGreetingPlaying.value ||
+                    audioManager.isPlaying()
+                ) {
+                    continue
+                }
+                val now = System.currentTimeMillis()
+                if (now - lastRenew < LISTEN_KEEPALIVE_INTERVAL_MS) continue
+                Log.d(TAG, "续期对话 listen 会话 (stop+start)")
+                VoiceFlowLog.step(
+                    "listen.keepalive",
+                    "session=${webSocketManager.getSessionId()}",
+                )
+                webSocketManager.sendStopListening()
+                webSocketManager.sendStartListening("auto")
+                lastRenew = System.currentTimeMillis()
+            }
+        }
+    }
+
+    private fun stopListeningKeepalive() {
+        listeningKeepaliveJob?.cancel()
+        listeningKeepaliveJob = null
     }
 
     private fun scheduleStandbyReadyPoll() {
         if (!conversationUiActive) return
         standbyReadyPollJob?.cancel()
         standbyReadyPollJob = viewModelScope.launch {
-            repeat(30) {
+            repeat(40) {
                 updateStandbyReady()
                 if (_isStandbyReady.value) return@launch
-                delay(500)
+                delay(150)
             }
             updateStandbyReady()
         }
+    }
+
+    /** 说「退下」后立即释放麦克风，并在结束语播放期间预初始化唤醒采集 */
+    private fun beginSessionEndWindDown() {
+        logFlow("sessionEnd.windDown.begin", "释放麦克风并预初始化唤醒采集")
+        clearWakeGreetingSuppression()
+        cancelListenHandoff()
+        audioManager.stopRecording()
+        audioManager.releaseRecorderOnly()
+        isAudioInitialized = false
+        XiaozhiWakeForegroundService.prepareWakeAudioCapture(getApplication())
+        Log.d(TAG, "结束语等待：已释放麦克风，预初始化唤醒采集")
     }
 
     private fun pauseConversationForUi() {
@@ -431,6 +594,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             webSocketManager.sendStopListening()
             webSocketManager.sendAbort("voice_key_stop")
         }
+        stopListeningKeepalive()
         _state.value = ConversationState.IDLE
         Log.i(TAG, "录音键：结束对话 → 待机")
         prepareStandbyWakeListening()
@@ -507,6 +671,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     fun onVoiceWakeDetected() {
         Log.i(TAG, "onVoiceWakeDetected 关键词=${WakePhraseMatcher.WAKE_PHRASE}")
+        logFlow("wake.detected", "关键词=${WakePhraseMatcher.WAKE_PHRASE}")
+        wakeConversationHandoff = true
         isAutoMode = true
         pendingVoiceWake = true
         pendingRecordKeyStart = false
@@ -529,21 +695,25 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun tryHandlePendingVoiceWake() {
         if (!pendingVoiceWake) return
         if (!conversationUiActive) {
+            VoiceFlowLog.decision("wake.pending", "开麦", false, "对话页未就绪")
             Log.d(TAG, "pendingWake: 对话页未就绪")
             return
         }
         if (!_isConnected.value) {
+            VoiceFlowLog.decision("wake.pending", "开麦", false, "WebSocket 未连接")
             Log.d(TAG, "pendingWake: WebSocket 未连接")
             return
         }
         if (_state.value != ConversationState.IDLE) {
+            VoiceFlowLog.warn("wake.pending", "非 IDLE(${_state.value})，重置后重试")
             Log.d(TAG, "pendingWake: 状态=${_state.value}，重置为 IDLE")
             audioManager.stopPlaying()
             audioManager.stopRecording()
             webSocketManager.sendAbort("wake_handoff")
-            _state.value = ConversationState.IDLE
+            transitionState(ConversationState.IDLE, "pendingWake_reset")
         }
         if (!ensureAudioReadyForPendingWake()) {
+            VoiceFlowLog.decision("wake.pending", "开麦", false, "音频未就绪")
             return
         }
 
@@ -554,9 +724,48 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         pauseWakeListening()
         showWakePhraseAsUserMessage(WakePhraseMatcher.WAKE_PHRASE)
         webSocketManager.sendWakeWordDetected(WakePhraseMatcher.WAKE_PHRASE)
+        scheduleWakeGreetingSuppression()
         Log.i(TAG, "pendingWake → 发送 detect + 开始自动对话")
-        XiaozhiWakeCoordinator.clearWakeHandoff("conversation_started")
+        logFlow("wake.detect.sent", "detect=${WakePhraseMatcher.WAKE_PHRASE}")
         startAutoConversation()
+    }
+
+    private fun scheduleWakeGreetingSuppression() {
+        suppressWakeGreetingUntilMs = System.currentTimeMillis() + WAKE_GREETING_SUPPRESS_MS
+        VoiceFlowLog.step(
+            "wake.greetingWindow",
+            "开启 ${WAKE_GREETING_SUPPRESS_MS}ms，until=$suppressWakeGreetingUntilMs",
+        )
+    }
+
+    /** detect 后一段时间内视为唤醒问候窗口：播放问候 TTS，但不切 SPEAKING、不打断开麦 */
+    private fun isWakeGreetingWindow(): Boolean =
+        System.currentTimeMillis() < suppressWakeGreetingUntilMs
+
+    private fun clearWakeGreetingSuppression() {
+        if (suppressWakeGreetingUntilMs > 0L) {
+            VoiceFlowLog.step("wake.greetingWindow", "清除")
+        }
+        suppressWakeGreetingUntilMs = 0L
+        setWakeGreetingPlaying(false)
+    }
+
+    private fun shouldSuppressWakeHandoffEcho(): Boolean =
+        isWakeGreetingWindow() ||
+            wakeConversationHandoff ||
+            pendingVoiceWake ||
+            listenHandoffJob?.isActive == true ||
+            XiaozhiWakeCoordinator.isWakeHandoffInProgress()
+
+    private fun clearWakeConversationHandoff(reason: String) {
+        if (!wakeConversationHandoff &&
+            !XiaozhiWakeCoordinator.isWakeHandoffInProgress()
+        ) {
+            return
+        }
+        wakeConversationHandoff = false
+        XiaozhiWakeCoordinator.clearWakeHandoff(reason)
+        logFlow("wake.handoff.clear", "reason=$reason")
     }
 
     private fun showWakePhraseAsUserMessage(phrase: String) {
@@ -640,6 +849,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         XiaozhiWakeForegroundService.ensureStarted(getApplication())
         XiaozhiWakeForegroundService.ensureListeningActive(getApplication())
         Log.d(TAG, "对话页待机：麦克风留给唤醒服务")
+        logFlow("standby.prepareWake", "ensureListeningActive 已调用")
         updateStandbyReady()
         scheduleStandbyReadyPoll()
     }
@@ -657,7 +867,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             Log.w(TAG, "结束语等待超时，进入待机")
             Log.w(SESSION_END_TAG, "20s 内未收到完整结束语，强制进入待机")
             pendingSessionEnd = false
-            enterStandby("session_end_timeout", notifyServer = false)
+            enterStandby("session_end_timeout", notifyServer = true, fastWake = true)
         }
     }
 
@@ -668,56 +878,160 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private fun scheduleSpeakingWatchdog() {
         cancelSpeakingWatchdog()
+        VoiceFlowLog.step("tts.watchdog", "启动 noAudio=${SPEAKING_NO_AUDIO_MS}ms total=${SPEAKING_WATCHDOG_MS}ms")
         speakingWatchdogJob = viewModelScope.launch {
-            delay(SPEAKING_WATCHDOG_MS)
+            delay(SPEAKING_NO_AUDIO_MS)
+            if (_state.value == ConversationState.SPEAKING && !audioManager.isPlaying()) {
+                VoiceFlowLog.warn(
+                    "tts.watchdog",
+                    "${SPEAKING_NO_AUDIO_MS}ms 无音频播放 → finishSpeakingTurn | ${flowContext()}",
+                )
+                Log.w(TAG, "TTS ${SPEAKING_NO_AUDIO_MS}ms 无音频，恢复聆听")
+                audioManager.stopPlaying()
+                finishSpeakingTurn("watchdog_no_audio")
+                return@launch
+            }
+            delay(SPEAKING_WATCHDOG_MS - SPEAKING_NO_AUDIO_MS)
             if (_state.value != ConversationState.SPEAKING) return@launch
+            VoiceFlowLog.warn(
+                "tts.watchdog",
+                "${SPEAKING_WATCHDOG_MS}ms 未收到 stop → finishSpeakingTurn | ${flowContext()}",
+            )
             Log.w(TAG, "TTS 超时未收到 stop，强制恢复")
             audioManager.stopPlaying()
-            finishSpeakingTurn()
+            finishSpeakingTurn("watchdog_timeout")
         }
     }
 
-    private fun finishSpeakingTurn() {
+    private fun finishSpeakingTurn(trigger: String = "tts_stop") {
         cancelSpeakingWatchdog()
-        audioManager.stopRecording()
+        VoiceFlowLog.step("tts.finish", "trigger=$trigger | ${flowContext()}")
+        if (_state.value == ConversationState.IDLE &&
+            (isWakeGreetingWindow() || isWakeHandoffInProgress())
+        ) {
+            audioManager.stopPlaying()
+            Log.d(TAG, "唤醒交接/问候窗口内忽略 IDLE TTS finish")
+            return
+        }
+        if (shouldSuppressWakeHandoffEcho() && !isWakeGreetingWindow()) {
+            VoiceFlowLog.decision("tts.finish", "处理 stop", false, "唤醒交接中")
+            Log.d(TAG, "唤醒交接中，忽略 TTS stop")
+            return
+        }
+        // 唤醒问候播完：只停播放，保持 LISTENING 开麦
+        if (_state.value == ConversationState.LISTENING &&
+            isAutoMode &&
+            !pendingSessionEnd &&
+            audioManager.isRecording() &&
+            (isWakeGreetingWindow() || _isWakeGreetingPlaying.value)
+        ) {
+            audioManager.stopPlaying()
+            setWakeGreetingPlaying(false)
+            Log.d(TAG, "唤醒问候播完，继续聆听")
+            return
+        }
+        // 已在自动聆听时收到的 stop 多为 detect 后迟到的问候回显，保持开麦
+        if (_state.value == ConversationState.LISTENING &&
+            isAutoMode &&
+            !pendingSessionEnd &&
+            audioManager.isRecording()
+        ) {
+            VoiceFlowLog.decision("tts.finish", "处理 stop", false, "聆听中且正在录音，忽略迟来问候")
+            audioManager.stopPlaying()
+            Log.d(TAG, "聆听中忽略迟来 TTS stop")
+            return
+        }
         if (pendingSessionEnd) {
+            audioManager.stopRecording()
             pendingSessionEnd = false
             cancelSessionEndFallback()
             Log.i(TAG, "结束语播完 → 待机（不主动断开 WebSocket）")
             Log.i(SESSION_END_TAG, "结束语 TTS 播完，进入待机")
-            enterStandby("session_end_tts", notifyServer = false)
+            logFlow("sessionEnd.ttsDone", "trigger=$trigger")
+            enterStandby("session_end_tts", notifyServer = true, fastWake = true)
             return
         }
         if (isAutoMode && _isConnected.value && conversationUiActive) {
-            _state.value = ConversationState.IDLE
+            audioManager.stopPlaying()
+            if (_state.value == ConversationState.SPEAKING) {
+                audioManager.stopRecording()
+            }
+            if (audioManager.isRecording()) {
+                transitionState(ConversationState.LISTENING, "tts_finish_resume_listening")
+                Log.i(TAG, "TTS 结束 → 恢复聆听")
+                return
+            }
+            audioManager.stopRecording()
+            transitionState(ConversationState.IDLE, "tts_finish_next_round")
             Log.i(TAG, "TTS 结束 → 下一轮聆听")
             if (!startAutoConversation()) {
                 pendingAutoStart = true
+                VoiceFlowLog.warn("tts.finish", "startAutoConversation 失败，pendingAutoStart=true")
             }
             return
         }
+        audioManager.stopRecording()
         enterStandby("tts_end", notifyServer = false)
     }
 
+    /** 对话进行中（LISTENING/PROCESSING/SPEAKING）断线：自动重连并恢复开麦，而非进入待机 */
+    private fun shouldReconnectAfterConversationDisconnect(): Boolean {
+        if (!webSocketManager.isAutoReconnectEnabled() || !conversationUiActive) return false
+        if (pendingSessionEnd) return false
+        val inConversation = _state.value == ConversationState.LISTENING ||
+            _state.value == ConversationState.PROCESSING ||
+            _state.value == ConversationState.SPEAKING
+        return inConversation && isAutoMode
+    }
+
+    private fun beginWsReconnectAfterConversationDisconnect() {
+        pendingAutoStart = true
+        isAutoMode = true
+        XiaozhiWakeForegroundService.releaseMicrophoneForConversation(getApplication())
+        _isAwaitingReconnect.value = true
+        _isStandbyReady.value = false
+        transitionState(ConversationState.CONNECTING, "ws_disconnect_conversation")
+        Log.i(TAG, "对话中断连，重连后恢复自动对话")
+        VoiceFlowLog.warn(
+            "ws.disconnected",
+            "对话中断连 pendingAutoStart=true | ${flowContext()}",
+        )
+        updateStandbyReady()
+        scheduleStandbyReadyPoll()
+    }
+
     /** 结束当前对话轮次，回到待机（不发 listen start） */
-    private fun enterStandby(reason: String, notifyServer: Boolean = false) {
+    private fun enterStandby(
+        reason: String,
+        notifyServer: Boolean = false,
+        fastWake: Boolean = false,
+    ) {
         cancelListenHandoff()
         cancelSpeakingWatchdog()
         cancelSessionEndFallback()
+        stopListeningKeepalive()
         pendingSessionEnd = false
         pendingVoiceWake = false
         pendingAutoStart = false
         isAutoMode = false
+        setWakeGreetingPlaying(false)
         audioManager.stopRecording()
         audioManager.stopPlaying()
         if (notifyServer && _isConnected.value) {
             webSocketManager.sendStopListening()
         }
-        _state.value = ConversationState.IDLE
-        Log.i(TAG, "进入待机 reason=$reason notifyServer=$notifyServer")
-        resumeWakeListeningIfNeeded()
-        updateStandbyReady()
-        scheduleStandbyReadyPoll()
+        transitionState(ConversationState.IDLE, "enterStandby:$reason")
+        Log.i(TAG, "进入待机 reason=$reason notifyServer=$notifyServer fastWake=$fastWake")
+        logFlow("standby.enter", "reason=$reason notifyServer=$notifyServer fastWake=$fastWake")
+        if (fastWake) {
+            viewModelScope.launch {
+                prepareStandbyWakeListening()
+            }
+        } else {
+            resumeWakeListeningIfNeeded()
+            updateStandbyReady()
+            scheduleStandbyReadyPoll()
+        }
     }
 
     /**
@@ -923,6 +1237,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
             is WebSocketEvent.Connected -> {
                 Log.i(TAG, "WS Connected state=${_state.value} ui=$conversationUiActive pendingWake=$pendingVoiceWake")
+                logFlow("ws.connected", "session=${webSocketManager.getSessionId()}")
                 _isConnected.value = true
                 _isAwaitingReconnect.value = false
                 _errorMessage.value = null
@@ -931,7 +1246,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 }
                 tryHandlePendingVoiceWake()
                 tryHandlePendingRecordKeyStart()
-                tryStartAutoConversationIfNeeded()
+                if (pendingAutoStart) {
+                    initializeAudio()
+                } else {
+                    tryStartAutoConversationIfNeeded()
+                }
                 if (!XiaozhiWakeForegroundService.isWakeListeningHealthy()) {
                     resumeWakeListeningIfNeeded()
                 } else {
@@ -941,6 +1260,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
             is WebSocketEvent.Disconnected -> {
                 Log.w(TAG, "WS Disconnected state=${_state.value} pendingSessionEnd=$pendingSessionEnd")
+                logFlow("ws.disconnected", "autoReconnect=${webSocketManager.isAutoReconnectEnabled()}")
                 if (pendingSessionEnd) {
                     Log.i(
                         SESSION_END_TAG,
@@ -949,6 +1269,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 }
                 _isConnected.value = false
                 cancelSpeakingWatchdog()
+                stopListeningKeepalive()
                 val keepRecordKeyFlow = pendingRecordKeyStart
                 audioManager.stopRecording()
                 if (!pendingSessionEnd) {
@@ -963,13 +1284,19 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     (_state.value == ConversationState.SPEAKING || _state.value == ConversationState.PROCESSING)
                 ) {
                     Log.i(TAG, "服务器断线，等待结束语播完再待机")
+                } else if (shouldReconnectAfterConversationDisconnect()) {
+                    beginWsReconnectAfterConversationDisconnect()
                 } else if (_state.value == ConversationState.IDLE &&
                     webSocketManager.isAutoReconnectEnabled()
                 ) {
                     _isAwaitingReconnect.value = true
                     _isStandbyReady.value = false
-                    _state.value = ConversationState.CONNECTING
+                    transitionState(ConversationState.CONNECTING, "ws_disconnect_reconnect")
                     Log.i(TAG, "WS 断开 → 等待自动重连（不显示待机）")
+                    VoiceFlowLog.warn(
+                        "ws.disconnected",
+                        "待机中断连，等待重连 | blockers=${standbyReadyBlockers().joinToString(",")}",
+                    )
                     updateStandbyReady()
                     scheduleStandbyReadyPoll()
                 } else {
@@ -1006,17 +1333,16 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         if (XiaozhiAppEvents.isPhotoSessionActive()) {
             return false
         }
-        if (_state.value == ConversationState.LISTENING ||
-            _state.value == ConversationState.PROCESSING ||
-            _state.value == ConversationState.SPEAKING ||
-            pendingSessionEnd ||
-            isAutoMode
-        ) {
+        if (isActivelyInConversation()) {
+            return false
+        }
+        if (isWakeGreetingWindow()) {
             return false
         }
         return pendingVoiceWake ||
             XiaozhiWakeCoordinator.isWakeHandoffInProgress() ||
-            XiaozhiWakeForegroundService.isWakeListeningActive()
+            XiaozhiWakeForegroundService.isWakeListeningActive() ||
+            listenHandoffJob?.isActive == true
     }
 
     /**
@@ -1025,6 +1351,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun handleTextMessage(message: String) {
         try {
             if (shouldIgnoreConversationServerMessages()) {
+                VoiceFlowLog.step(
+                    "msg.ignore",
+                    "wakeActive=${XiaozhiWakeForegroundService.isWakeListeningActive()} | ${flowContext()}",
+                )
                 Log.v(TAG, "忽略唤醒阶段消息")
                 return
             }
@@ -1041,6 +1371,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             when (type) {
                 "stt" -> {
                     if (!conversationUiActive) return@handleTextMessage
+                    if (shouldSuppressWakeHandoffEcho()) {
+                        VoiceFlowLog.decision("msg.stt", "处理", false, "handoff/greet抑制")
+                        Log.d(TAG, "唤醒交接中，忽略 STT")
+                        return@handleTextMessage
+                    }
                     val text = json.get("text")?.asString
                     Log.d(TAG, "STT: $text")
                     if (!text.isNullOrEmpty() && XiaozhiAppEvents.isPhotoSessionActive()) {
@@ -1057,6 +1392,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     }
                     if (!text.isNullOrEmpty() && WakePhraseMatcher.isSessionEndPhrase(text)) {
                         Log.i(TAG, "检测到结束对话语句: $text，等待服务器回复")
+                        logFlow("sessionEnd.detected", "text=$text")
                         Log.i(
                             SESSION_END_TAG,
                             "用户说「$text」，开始等待服务器结束语（state=${_state.value}）",
@@ -1066,25 +1402,35 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         audioManager.stopRecording()
                         pendingSessionEnd = true
                         isAutoMode = false
-                        _state.value = ConversationState.PROCESSING
+                        transitionState(ConversationState.PROCESSING, "session_end_stt")
+                        beginSessionEndWindDown()
                         scheduleSessionEndFallback()
                         return@handleTextMessage
                     }
                     if (!text.isNullOrEmpty() && !text.contains("请登录控制面板")) {
+                        clearWakeGreetingSuppression()
                         currentUserMessage = text
                         addMessage(Message(
                             role = MessageRole.USER,
                             content = text
                         ))
                         audioManager.stopRecording()
-                        _state.value = ConversationState.PROCESSING
+                        transitionState(ConversationState.PROCESSING, "stt")
                     }
                 }
                 
                 "llm" -> {
-                    // 大语言模型结果
+                    if (shouldSuppressWakeHandoffEcho() && !isWakeGreetingWindow()) {
+                        VoiceFlowLog.decision("msg.llm", "处理", false, "handoff中")
+                        Log.d(TAG, "唤醒交接中，忽略 LLM")
+                        return@handleTextMessage
+                    }
                     val emotion = json.get("emotion")?.asString
                     val text = json.get("text")?.asString
+                    if (isWakeGreetingWindow() && !text.isNullOrBlank() && isLikelyEmotionOnly(text)) {
+                        Log.d(TAG, "唤醒问候窗口内忽略纯表情 LLM")
+                        return@handleTextMessage
+                    }
                     Log.d(TAG, "LLM emotion=$emotion text=$text")
                     if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
                         updateAssistantMessage(text)
@@ -1092,9 +1438,19 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 }
                 
                 "tts" -> {
-                    val state = json.get("state")?.asString
+                    val ttsState = json.get("state")?.asString
+                    if (shouldSuppressWakeHandoffEcho() && ttsState == "stop" && !isWakeGreetingWindow()) {
+                        VoiceFlowLog.decision("msg.tts.stop", "处理", false, "handoff中")
+                        Log.d(TAG, "唤醒交接中，忽略 TTS stop")
+                        return@handleTextMessage
+                    }
+                    val state = ttsState
                     when (state) {
                         "sentence_start" -> {
+                            if (shouldIgnoreStaleReplyWhileListening()) {
+                                Log.d(TAG, "聆听中忽略迟来 TTS sentence_start")
+                                return@handleTextMessage
+                            }
                             // TTS句子开始，显示要播放的文本
                             val text = json.get("text")?.asString
                             if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
@@ -1102,6 +1458,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                             }
                         }
                         "sentence_end" -> {
+                            if (shouldIgnoreStaleReplyWhileListening()) {
+                                Log.d(TAG, "聆听中忽略迟来 TTS sentence_end")
+                                return@handleTextMessage
+                            }
                             // TTS句子结束，有时包含完整的句子内容
                             val text = json.get("text")?.asString
                             if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
@@ -1115,22 +1475,89 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         }
                         "start" -> {
                             if (!conversationUiActive) return@handleTextMessage
+                            if (listenHandoffJob?.isActive == true && !isWakeGreetingWindow()) {
+                                VoiceFlowLog.decision("msg.tts.start", "→SPEAKING", false, "开麦交接中")
+                                Log.d(TAG, "开麦交接中，忽略 TTS start")
+                                return@handleTextMessage
+                            }
+                            if (_state.value == ConversationState.LISTENING &&
+                                isAutoMode &&
+                                audioManager.isRecording()
+                            ) {
+                                if (isWakeGreetingWindow()) {
+                                    setWakeGreetingPlaying(true)
+                                    Log.d(TAG, "唤醒问候播放中，保持聆听")
+                                    return@handleTextMessage
+                                }
+                                VoiceFlowLog.decision(
+                                    "msg.tts.start",
+                                    "→SPEAKING",
+                                    false,
+                                    "已在聆听，忽略迟来问候",
+                                )
+                                Log.d(TAG, "已在聆听，忽略迟来 TTS start")
+                                return@handleTextMessage
+                            }
+                            if (listenHandoffJob?.isActive == true && isWakeGreetingWindow()) {
+                                Log.d(TAG, "唤醒问候到达（开麦交接中），保持 IDLE 播放")
+                                return@handleTextMessage
+                            }
                             val canPlayTts = _state.value == ConversationState.PROCESSING ||
                                 _state.value == ConversationState.SPEAKING ||
                                 pendingSessionEnd ||
-                                (_state.value == ConversationState.LISTENING && isAutoMode)
+                                (_state.value == ConversationState.LISTENING && isAutoMode) ||
+                                (isAutoMode && shouldSuppressWakeHandoffEcho())
                             if (!canPlayTts) {
+                                VoiceFlowLog.decision(
+                                    "msg.tts.start",
+                                    "→SPEAKING",
+                                    false,
+                                    "state=${_state.value} auto=$isAutoMode pendingEnd=$pendingSessionEnd",
+                                )
                                 Log.d(TAG, "忽略非对话中的 TTS start")
                                 return@handleTextMessage
                             }
-                            _state.value = ConversationState.SPEAKING
+                            transitionState(ConversationState.SPEAKING, "tts_start")
                             scheduleSpeakingWatchdog()
+                            VoiceFlowLog.decision("msg.tts.start", "→SPEAKING", true, flowContext())
                             Log.d(TAG, "TTS start → SPEAKING")
                         }
                         "stop" -> {
+                            if (_state.value == ConversationState.IDLE &&
+                                (isWakeGreetingWindow() || isWakeHandoffInProgress())
+                            ) {
+                                audioManager.stopPlaying()
+                                Log.d(TAG, "唤醒交接/问候窗口内忽略 IDLE TTS stop")
+                                return@handleTextMessage
+                            }
+                            if (_state.value == ConversationState.LISTENING &&
+                                isAutoMode &&
+                                !pendingSessionEnd &&
+                                (isWakeGreetingWindow() || _isWakeGreetingPlaying.value)
+                            ) {
+                                audioManager.stopPlaying()
+                                setWakeGreetingPlaying(false)
+                                Log.d(TAG, "唤醒问候 TTS stop，继续聆听")
+                                return@handleTextMessage
+                            }
+                            if (_state.value == ConversationState.LISTENING &&
+                                isAutoMode &&
+                                !pendingSessionEnd
+                            ) {
+                                VoiceFlowLog.decision(
+                                    "msg.tts.stop",
+                                    "finishSpeakingTurn",
+                                    false,
+                                    "聆听中忽略迟来问候stop",
+                                )
+                                Log.d(TAG, "聆听中忽略迟来 TTS stop")
+                                audioManager.stopPlaying()
+                                return@handleTextMessage
+                            }
                             if (!pendingSessionEnd) {
                                 audioManager.stopPlaying()
                             }
+                            VoiceFlowLog.step("msg.tts.stop", "pendingEnd=$pendingSessionEnd play=${audioManager.isPlaying()}")
                             Log.d(TAG, "TTS stop pendingSessionEnd=$pendingSessionEnd")
                             if (XiaozhiAppEvents.isPhotoSessionActive()) {
                                 XiaozhiAppEvents.endPhotoSession()
@@ -1140,13 +1567,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                                 cancelSpeakingWatchdog()
                                 return@handleTextMessage
                             }
-                            finishSpeakingTurn()
+                            finishSpeakingTurn("tts_stop")
                         }
                     }
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "解析文本消息失败", e)
+            VoiceFlowLog.error("msg.parse", e.message ?: "unknown")
         }
     }
 
@@ -1155,8 +1583,19 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     private fun handleBinaryMessage(data: ByteArray) {
         if (!conversationUiActive || shouldIgnoreConversationServerMessages()) return
+        if (!shouldPlayDownlinkAudio()) {
+            VoiceFlowLog.step(
+                "msg.binary",
+                "忽略待机态TTS音频 ${data.size}B state=${_state.value}",
+            )
+            Log.v(TAG, "忽略待机态 TTS 音频 ${data.size} bytes state=${_state.value}")
+            return
+        }
         if (pendingSessionEnd) {
             logSessionEndServerReply("binary", "tts_audio ${data.size} bytes")
+        }
+        if (isWakeGreetingWindow() && _state.value == ConversationState.LISTENING) {
+            setWakeGreetingPlaying(true)
         }
         Log.v(TAG, "收到音频 ${data.size} bytes")
         audioManager.playAudio(data)
@@ -1236,6 +1675,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         listenHandoffJob = viewModelScope.launch {
             performAutoConversationHandoff()
         }
+        VoiceFlowLog.step("handoff.start", "协程已启动 | ${flowContext()}")
         return true
     }
 
@@ -1245,28 +1685,48 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     @SuppressLint("MissingPermission")
     private suspend fun performAutoConversationHandoff() {
+        val t0 = System.currentTimeMillis()
+        VoiceFlowLog.snapshot("handoff.begin", flowContext())
         XiaozhiWakeForegroundService.claimMicrophoneForConversation(getApplication())
         pauseWakeListening()
 
         isAutoMode = true
         hasLoggedFirstAudioFrame = false
         webSocketManager.sendStopListening()
+        VoiceFlowLog.step("handoff", "sendStopListening + delay 150ms")
         delay(150)
 
+        if (_state.value == ConversationState.SPEAKING) {
+            VoiceFlowLog.warn("handoff", "SPEAKING 冲突（问候回显），abort 后继续开麦")
+            webSocketManager.sendAbort("wake_greeting_echo")
+            audioManager.stopPlaying()
+            transitionState(ConversationState.IDLE, "handoff_clear_speaking")
+            delay(150)
+        }
+
         if (!isAutoMode || _state.value != ConversationState.IDLE) {
+            VoiceFlowLog.warn("handoff.abort", "cancelled state=${_state.value} auto=$isAutoMode")
             Log.d(TAG, "开麦交接已取消 state=${_state.value}")
             isAutoMode = false
+            clearWakeConversationHandoff("handoff_cancelled")
             XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
             return
         }
         if (!_isConnected.value || !conversationUiActive) {
+            VoiceFlowLog.warn(
+                "handoff.abort",
+                "disconnected=${!_isConnected.value} uiInactive=${!conversationUiActive}",
+            )
             isAutoMode = false
+            clearWakeConversationHandoff("handoff_disconnected")
             XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
             return
         }
         if (!ensureRecordingReady()) {
+            VoiceFlowLog.warn("handoff.abort", "音频未就绪")
             isAutoMode = false
             pendingAutoStart = true
+            clearWakeConversationHandoff("handoff_audio_not_ready")
             XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
             if (pendingRecordKeyStart || XiaozhiAppEvents.hasPendingVoiceKeyPress()) {
                 scheduleRecordKeyRetry()
@@ -1275,9 +1735,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         if (!audioManager.startRecording()) {
+            VoiceFlowLog.error("handoff.abort", "startRecording 失败")
             isAutoMode = false
             _state.value = ConversationState.IDLE
             Log.e(TAG, "startRecording 失败")
+            clearWakeConversationHandoff("handoff_record_failed")
             XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
             if (pendingRecordKeyStart || XiaozhiAppEvents.hasPendingVoiceKeyPress()) {
                 scheduleRecordKeyRetry()
@@ -1286,7 +1748,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         webSocketManager.sendStartListening("auto")
-        _state.value = ConversationState.LISTENING
+        transitionState(ConversationState.LISTENING, "handoff_done")
         pendingAutoStart = false
         pendingRecordKeyStart = false
         pendingRecordKeyRetryCount = 0
@@ -1294,12 +1756,19 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         XiaozhiAppEvents.clearPendingVoiceKeyPress()
         scheduleListeningHealthCheck()
         updateStandbyReady()
+        clearWakeConversationHandoff("listening_started")
+        val elapsed = System.currentTimeMillis() - t0
+        VoiceFlowLog.snapshot(
+            "handoff.done",
+            "elapsed=${elapsed}ms recording=${audioManager.isRecording()} | ${flowContext()}",
+        )
         Log.i(TAG, "开始自动对话 mode=auto recording=${audioManager.isRecording()}")
     }
 
     private fun cancelListenHandoff() {
         listenHandoffJob?.cancel()
         listenHandoffJob = null
+        clearWakeConversationHandoff("handoff_cancelled")
         XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
     }
 

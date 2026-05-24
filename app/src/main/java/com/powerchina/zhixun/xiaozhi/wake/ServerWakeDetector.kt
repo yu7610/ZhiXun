@@ -15,6 +15,7 @@ import com.powerchina.zhixun.audio.utils.OpusEncoder
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.network.WebSocketEvent
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
+import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +41,9 @@ class ServerWakeDetector(
         private const val FRAME_BYTES = SAMPLE_RATE * FRAME_MS / 1000 * 2
         private const val CONNECT_TIMEOUT_MS = 20_000L
         private const val HEARTBEAT_INTERVAL_MS = 5_000L
+        /** 服务端 listen 约 30s 超时，定期续期 listen/start */
+        /** 服务端 listen 会话约 30s 超时，stop+start 续期需早于该阈值 */
+        private const val LISTEN_REFRESH_INTERVAL_MS = 12_000L
     }
 
     private val appContext = context.applicationContext
@@ -84,14 +88,51 @@ class ServerWakeDetector(
         acquireWakeLock()
         registerTextListener()
         Log.i(TAG, "启动服务端 STT 唤醒，关键词=${WakePhraseMatcher.WAKE_PHRASE}")
+        VoiceFlowLog.snapshot("wakeSTT.start", "gen=$streamGeneration keyword=${WakePhraseMatcher.WAKE_PHRASE}")
         sessionManager.ensureConnected()
-        eventJob = scope.launch { listenWebSocketEvents() }
+        ensureEventJob()
         launchStreaming("start")
     }
+
+    /** 对话结束后快速恢复：复用 eventJob，跳过完整 start 流程 */
+    override fun resume() {
+        if (active) {
+            Log.d(TAG, "已在运行，跳过 resume")
+            return
+        }
+        if (!isConfigReady()) {
+            Log.e(TAG, "小智未配置，无法恢复服务端唤醒")
+            return
+        }
+        active = true
+        startingUp = true
+        streaming = false
+        streamGeneration++
+        acquireWakeLock()
+        registerTextListener()
+        ensureEventJob()
+        Log.i(TAG, "快速恢复服务端 STT 唤醒")
+        VoiceFlowLog.snapshot("wakeSTT.resume", "gen=$streamGeneration hasRecord=${audioRecord?.state == AudioRecord.STATE_INITIALIZED}")
+        launchStreaming("resume")
+    }
+
+    /** 结束语播放期间预创建 AudioRecord，缩短恢复唤醒时间 */
+    fun prepareAudioCapture() {
+        if (active || streaming) return
+        if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) return
+        if (createAudioRecord()) {
+            Log.d(TAG, "预创建 AudioRecord 完成")
+            VoiceFlowLog.step("wakeSTT.preAudio", "AudioRecord 预创建成功")
+        }
+    }
+
+    fun canQuickResume(): Boolean =
+        !active && audioRecord?.state == AudioRecord.STATE_INITIALIZED
 
     override fun pause() {
         if (!active) return
         Log.d(TAG, "暂停服务端唤醒")
+        VoiceFlowLog.step("wakeSTT.pause", "gen=$streamGeneration frames=paused")
         active = false
         streaming = false
         startingUp = false
@@ -104,6 +145,7 @@ class ServerWakeDetector(
 
     override fun stop() {
         Log.d(TAG, "停止服务端唤醒")
+        VoiceFlowLog.step("wakeSTT.stop", "gen=$streamGeneration")
         active = false
         streaming = false
         startingUp = false
@@ -137,24 +179,34 @@ class ServerWakeDetector(
         removeTextListener = null
     }
 
+    private fun ensureEventJob() {
+        if (eventJob?.isActive == true) return
+        eventJob = scope.launch { listenWebSocketEvents() }
+    }
+
     private fun launchStreaming(reason: String) {
         val gen = streamGeneration
         streamingJob?.cancel()
         streamingJob = scope.launch {
             Log.d(TAG, "推流任务启动 reason=$reason gen=$gen")
-            waitConnectAndStream(gen)
+            waitConnectAndStream(gen, reason)
         }
     }
 
-    private suspend fun waitConnectAndStream(generation: Int) {
+    private suspend fun waitConnectAndStream(generation: Int, reason: String) {
         if (generation != streamGeneration || !active) return
 
-        val connected = withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
-            while (active && generation == streamGeneration && !webSocket.isConnected()) {
-                delay(200)
-            }
-            webSocket.isConnected()
-        } ?: false
+        val alreadyConnected = webSocket.isConnected()
+        val connected = if (alreadyConnected) {
+            true
+        } else {
+            withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
+                while (active && generation == streamGeneration && !webSocket.isConnected()) {
+                    delay(200)
+                }
+                webSocket.isConnected()
+            } ?: false
+        }
 
         if (!active || generation != streamGeneration) return
         if (!connected) {
@@ -170,8 +222,16 @@ class ServerWakeDetector(
 
         Log.i(
             TAG,
-            "WebSocket 就绪 session=${webSocket.getSessionId()}，发送 listen/start",
+            "WebSocket 就绪 session=${webSocket.getSessionId()} reason=$reason，发送 listen/start",
         )
+        VoiceFlowLog.step(
+            "wakeSTT.listen",
+            "reason=$reason session=${webSocket.getSessionId()} gen=$generation",
+        )
+        webSocket.sendStopListening()
+        if (reason == "resume" || reason == "start") {
+            delay(80)
+        }
         webSocket.sendStartListening("auto")
         streamAudioLoop(generation)
     }
@@ -182,10 +242,12 @@ class ServerWakeDetector(
             when (event) {
                 is WebSocketEvent.Connected -> {
                     Log.i(TAG, "WebSocket Connected，重启唤醒推流")
+                    VoiceFlowLog.snapshot("wakeSTT.wsConnected", "session=${webSocket.getSessionId()} gen=$streamGeneration")
                     launchStreaming("reconnect")
                 }
                 is WebSocketEvent.Disconnected -> {
                     Log.w(TAG, "WebSocket Disconnected，等待重连")
+                    VoiceFlowLog.warn("wakeSTT.wsDisconnected", "session=${webSocket.getSessionId()} gen=$streamGeneration streaming=$streaming")
                 }
                 else -> Unit
             }
@@ -218,6 +280,7 @@ class ServerWakeDetector(
         startingUp = false
         streamGeneration++
         Log.i(TAG, "★ 命中唤醒词「${WakePhraseMatcher.WAKE_PHRASE}」")
+        VoiceFlowLog.snapshot("wakeSTT.hit", "phrase=${WakePhraseMatcher.WAKE_PHRASE} gen=$streamGeneration")
         unregisterTextListener()
         streamingJob?.cancel()
         streamingJob = null
@@ -232,12 +295,15 @@ class ServerWakeDetector(
     }
 
     private suspend fun streamAudioLoop(generation: Int) {
-        stopAudio()
         streaming = false
-        if (!createAudioRecord()) {
-            Log.e(TAG, "AudioRecord 创建失败")
-            markStartupFailed()
-            return
+        val hasRecord = audioRecord?.state == AudioRecord.STATE_INITIALIZED
+        if (!hasRecord) {
+            stopAudio()
+            if (!createAudioRecord()) {
+                Log.e(TAG, "AudioRecord 创建失败")
+                markStartupFailed()
+                return
+            }
         }
         try {
             opusEncoder = OpusEncoder(SAMPLE_RATE, 1, FRAME_MS)
@@ -254,11 +320,13 @@ class ServerWakeDetector(
         var encodeFailures = 0
         var notReadySkips = 0
         var lastHeartbeat = System.currentTimeMillis()
+        var lastListenRefresh = System.currentTimeMillis()
 
         audioRecord?.startRecording()
         streaming = true
         startingUp = false
         Log.i(TAG, "Opus 推流开始 gen=$generation")
+        VoiceFlowLog.snapshot("wakeSTT.streaming", "gen=$generation session=${webSocket.getSessionId()}")
 
         while (active && generation == streamGeneration && scope.isActive) {
             val read = audioRecord?.read(readBuffer, 0, readBuffer.size) ?: break
@@ -296,6 +364,16 @@ class ServerWakeDetector(
                             "wsSkip=$notReadySkips session=${webSocket.getSessionId()}",
                     )
                     lastHeartbeat = now
+                    if (now - lastListenRefresh >= LISTEN_REFRESH_INTERVAL_MS) {
+                        Log.d(TAG, "续期 listen 会话 gen=$generation (stop+start)")
+                        VoiceFlowLog.step(
+                            "wakeSTT.listenRenew",
+                            "gen=$generation session=${webSocket.getSessionId()} frames=$framesSent",
+                        )
+                        webSocket.sendStopListening()
+                        webSocket.sendStartListening("auto")
+                        lastListenRefresh = System.currentTimeMillis()
+                    }
                 }
             }
         }
@@ -304,6 +382,10 @@ class ServerWakeDetector(
         Log.d(
             TAG,
             "推流结束 gen=$generation frames=$framesSent reason=${if (!active) "paused" else "cancelled"}",
+        )
+        VoiceFlowLog.step(
+            "wakeSTT.streamingEnd",
+            "gen=$generation frames=$framesSent reason=${if (!active) "paused" else "cancelled"}",
         )
     }
 
@@ -385,6 +467,7 @@ interface WakeListener {
     /** 已 start 但尚未推流（连接 WS / 初始化麦克风） */
     val isStarting: Boolean get() = false
     fun start()
+    fun resume() = start()
     fun pause()
     fun stop()
 }
