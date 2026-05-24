@@ -125,7 +125,7 @@ object XiaozhiMcpHandler {
                     PhotoResult(
                         file = photoFile,
                         uploadResult = Result.success(Unit),
-                        visionDescription = visionResult.response,
+                        visionDescription = XiaozhiVisionClient.displayTextFromResult(visionResult),
                     ),
                 )
                 Log.i(TAG, "MCP tools/call 拍照完成 question=$question")

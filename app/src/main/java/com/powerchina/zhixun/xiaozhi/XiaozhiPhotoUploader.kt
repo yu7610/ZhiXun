@@ -2,6 +2,7 @@ package com.powerchina.zhixun.xiaozhi
 
 import android.app.Application
 import android.util.Log
+import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.network.WebSocketManager
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import java.io.File
@@ -10,13 +11,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * 将执法仪照片压缩后通过小智 MCP 视觉 HTTP 接口上传。
+ * 将执法仪照片压缩后上传隐患检测 HTTP 接口，并将结果发送到小智对话。
  */
 object XiaozhiPhotoUploader {
 
     private const val TAG = "XiaozhiPhoto"
     private const val CONNECT_WAIT_MS = 15_000L
-    private const val VISION_CONFIG_WAIT_MS = 12_000L
 
     suspend fun uploadPhoto(
         application: Application,
@@ -28,9 +28,10 @@ object XiaozhiPhotoUploader {
             val sessionManager = XiaozhiSessionManager.getInstance(application)
             val webSocket = sessionManager.webSocketManager
             waitForConnection(webSocket)
-            webSocket.sendVisionQuery(visionResult.response)
-            Log.i(TAG, "已发送视觉结果到对话 len=${visionResult.response.length}")
-            visionResult.response
+            val displayText = XiaozhiVisionClient.displayTextFromResult(visionResult)
+            webSocket.sendVisionQuery(displayText)
+            Log.i(TAG, "已发送视觉结果到对话 len=${displayText.length}")
+            displayText
         }.onFailure { e ->
             Log.e(TAG, "上传照片失败", e)
             XiaozhiAppEvents.endPhotoSession()
@@ -40,7 +41,7 @@ object XiaozhiPhotoUploader {
     suspend fun uploadPhotoForMcp(
         application: Application,
         photoFile: File,
-        prompt: String = "请描述这张照片",
+        @Suppress("UNUSED_PARAMETER") prompt: String = "请描述这张照片",
     ): Result<VisionExplainResult> = withContext(Dispatchers.IO) {
         runCatching {
             val sessionManager = XiaozhiSessionManager.getInstance(application)
@@ -56,7 +57,7 @@ object XiaozhiPhotoUploader {
                 throw IllegalStateException("照片过大(${jpegBytes.size} bytes)，请靠近拍摄")
             }
 
-            val visionConfig = waitForVisionConfig()
+            val macAddress = ConfigManager(application).loadConfig().macAddress
             Log.i(
                 TAG,
                 "上传照片 ${photoFile.name} size=${jpegBytes.size} bytes session=${webSocket.getSessionId()}",
@@ -67,11 +68,11 @@ object XiaozhiPhotoUploader {
             webSocket.sendStopListening()
             delay(250)
 
-            XiaozhiVisionClient.explain(
+            XiaozhiVisionClient.detectImageFile(
                 context = application,
-                config = visionConfig,
+                deviceId = macAddress,
                 jpegBytes = jpegBytes,
-                question = prompt,
+                filename = photoFile.name,
             ).getOrThrow()
         }.onFailure { e ->
             Log.e(TAG, "视觉上传失败", e)
@@ -83,17 +84,6 @@ object XiaozhiPhotoUploader {
         while (!webSocketManager.isConnected()) {
             if (System.currentTimeMillis() >= deadline) {
                 throw IllegalStateException("小智未连接，请检查网络与配置")
-            }
-            delay(100)
-        }
-    }
-
-    private suspend fun waitForVisionConfig(): XiaozhiVisionConfig {
-        val deadline = System.currentTimeMillis() + VISION_CONFIG_WAIT_MS
-        while (true) {
-            XiaozhiVisionRegistry.get()?.let { return it }
-            if (System.currentTimeMillis() >= deadline) {
-                throw IllegalStateException("未收到 MCP 视觉端点，请重新连接小智")
             }
             delay(100)
         }
