@@ -1,7 +1,10 @@
 package com.powerchina.zhixun.ui
 
 import android.app.Activity
+import android.widget.Toast
 import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalOverscrollConfiguration
@@ -80,6 +83,7 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.powerchina.zhixun.R
 import com.powerchina.zhixun.data.Message
+import com.powerchina.zhixun.screenrecord.ScreenRecordController
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.viewmodel.ConversationState
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
@@ -193,11 +197,47 @@ private fun MainConversationContent(
     errorMessage: String?,
     viewModel: ConversationViewModel,
 ) {
+    val context = LocalContext.current
+    val activity = context as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val featureComingText = stringResource(R.string.dashcam_feature_coming)
     val onFeatureComing: () -> Unit = {
         scope.launch { snackbarHostState.showSnackbar(featureComingText) }
+    }
+
+    val isScreenRecording by ScreenRecordController.isRecording.collectAsState()
+    val screenRecordElapsed by ScreenRecordController.elapsedSeconds.collectAsState()
+    val lastSavedRecording by ScreenRecordController.lastSavedPath.collectAsState()
+
+    val projectionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            ScreenRecordController.onConsentGranted(result.resultCode, result.data!!)
+            ScreenRecordController.startWithCachedConsent(context)
+        }
+    }
+
+    val onScreenRecordClick: () -> Unit = {
+        if (isScreenRecording) {
+            ScreenRecordController.stop(context)
+        } else if (ScreenRecordController.hasCachedConsent()) {
+            ScreenRecordController.startWithCachedConsent(context)
+        } else {
+            activity?.let { projectionLauncher.launch(ScreenRecordController.createCaptureIntent(it)) }
+        }
+    }
+
+    LaunchedEffect(lastSavedRecording) {
+        val path = lastSavedRecording ?: return@LaunchedEffect
+        val name = File(path).name
+        Toast.makeText(
+            context,
+            context.getString(R.string.screen_record_saved, name),
+            Toast.LENGTH_SHORT,
+        ).show()
+        ScreenRecordController.consumeSavedPath()
     }
 
     LaunchedEffect(errorMessage) {
@@ -225,7 +265,9 @@ private fun MainConversationContent(
                 isWakeGreetingPlaying = isWakeGreetingPlaying,
                 onShowSettings = onShowSettings,
                 onLocationClick = onFeatureComing,
-                onScreenRecordClick = onFeatureComing,
+                onScreenRecordClick = onScreenRecordClick,
+                isScreenRecording = isScreenRecording,
+                screenRecordElapsed = screenRecordElapsed,
                 onBack = onBack,
             )
         },
@@ -315,8 +357,11 @@ private fun TopBar(
     onShowSettings: () -> Unit,
     onLocationClick: () -> Unit,
     onScreenRecordClick: () -> Unit,
+    isScreenRecording: Boolean,
+    screenRecordElapsed: Long,
     onBack: (() -> Unit)?,
 ) {
+    val recordTint = if (isScreenRecording) Color(0xFFE53935) else AuraPrimary
     val statusText = statusLabel(
         state = conversationState,
         isConnected = isConnected,
@@ -357,6 +402,7 @@ private fun TopBar(
         Row(
             modifier = Modifier.align(Alignment.CenterEnd),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onLocationClick) {
                 Icon(
@@ -365,11 +411,21 @@ private fun TopBar(
                     tint = AuraPrimary,
                 )
             }
+            if (isScreenRecording) {
+                Text(
+                    text = stringResource(
+                        R.string.screen_record_timer,
+                        ScreenRecordController.formatElapsed(screenRecordElapsed),
+                    ),
+                    color = recordTint,
+                    style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
+                )
+            }
             IconButton(onClick = onScreenRecordClick) {
                 Icon(
                     imageVector = Icons.Outlined.ScreenShare,
                     contentDescription = stringResource(R.string.feature_screen_record),
-                    tint = AuraPrimary,
+                    tint = recordTint,
                 )
             }
         }
