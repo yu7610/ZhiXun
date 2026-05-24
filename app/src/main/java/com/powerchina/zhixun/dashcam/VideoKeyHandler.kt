@@ -3,9 +3,10 @@ package com.powerchina.zhixun.dashcam
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 
 /**
- * 物理录像键统一处理（广播 / 按键事件）。
+ * 物理键统一处理（广播 / KeyEvent）。
  */
 object VideoKeyHandler {
 
@@ -13,45 +14,64 @@ object VideoKeyHandler {
     private var lastHandleAtMs = 0L
 
     fun handleBroadcast(context: Context, intent: Intent?): Boolean {
-        Log.d(VideoKeyReceiver.TAG, "handleBroadcast: intent=$intent action=${intent?.action} extras=${intent?.extras}")
-        val action = intent?.action
-        if (action == null) {
+        Log.d(
+            VideoKeyReceiver.TAG,
+            "handleBroadcast: intent=$intent action=${intent?.action} extras=${intent?.extras}",
+        )
+        val action = intent?.action ?: return false.also {
             Log.w(VideoKeyReceiver.TAG, "handleBroadcast: action 为空")
-            return false
         }
-        val keyAction = resolveKeyAction(action)
-        if (keyAction == null) {
+        val keyAction = resolveKeyAction(action) ?: return false.also {
             Log.w(VideoKeyReceiver.TAG, "handleBroadcast: 未识别的 action=$action")
-            return false
         }
-        return dispatch(context, keyAction, "Broadcast:$action")
+        return dispatch(context, keyAction, keyCode = null, source = "Broadcast:$action")
     }
 
     fun handleKeyEvent(context: Context, keyAction: DashcamVideoKeyEvents.KeyAction): Boolean {
-        return dispatch(context, keyAction, "KeyEvent")
+        return dispatch(context, keyAction, keyCode = null, source = "KeyEvent")
+    }
+
+    fun handleKeyCode(context: Context, keyCode: Int): Boolean {
+        val keyAction = PhysicalKeyCodes.actionForKeyCode(keyCode) ?: return false
+        return dispatch(context, keyAction, keyCode = keyCode, source = "KeyEvent")
     }
 
     private fun dispatch(
         context: Context,
         keyAction: DashcamVideoKeyEvents.KeyAction,
+        keyCode: Int?,
         source: String,
     ): Boolean {
         val now = System.currentTimeMillis()
         if (now - lastHandleAtMs < DEBOUNCE_MS) {
-            Log.d(VideoKeyReceiver.TAG, "忽略重复按键 source=$source 间隔=${now - lastHandleAtMs}ms")
+            Log.d(
+                VideoKeyReceiver.TAG,
+                "忽略重复按键 source=$source keyCode=$keyCode 间隔=${now - lastHandleAtMs}ms",
+            )
             return true
         }
         lastHandleAtMs = now
 
-        Log.i(VideoKeyReceiver.TAG, "收到物理录像键 source=$source -> $keyAction")
-        DashcamVideoKeyEvents.emit(keyAction)
-
-        val launchIntent = Intent(context, DashcamActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        Log.i(
+            VideoKeyReceiver.TAG,
+            "收到物理键 source=$source keyCode=$keyCode -> $keyAction",
+        )
+        return when (keyAction) {
+            DashcamVideoKeyEvents.KeyAction.PHOTO -> {
+                Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.PHOTO} 拍照 -> 上传聊天")
+                XiaozhiAppEvents.requestPhotoCapture()
+                true
+            }
+            DashcamVideoKeyEvents.KeyAction.RECORD -> {
+                DashcamVideoKeyEvents.emit(keyAction)
+                val launchIntent = Intent(context, DashcamActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.RECORD} 录像 -> DashcamActivity")
+                context.startActivity(launchIntent)
+                true
+            }
         }
-        Log.d(VideoKeyReceiver.TAG, "启动 DashcamActivity")
-        context.startActivity(launchIntent)
-        return true
     }
 
     fun resolveKeyAction(action: String): DashcamVideoKeyEvents.KeyAction? {
@@ -59,12 +79,12 @@ object VideoKeyHandler {
             VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY,
             "intent.action.PRESS_VIDEO_KEY",
             "com.android.intent.action.PRESS_VIDEO_KEY",
-            -> DashcamVideoKeyEvents.KeyAction.PRESS
+            -> DashcamVideoKeyEvents.KeyAction.PHOTO
 
             VideoKeyReceiver.ACTION_LONG_PRESS_VIDEO_KEY,
             "intent.action.LONG_PRESS_VIDEO_KEY",
             "com.android.intent.action.LONG_PRESS_VIDEO_KEY",
-            -> DashcamVideoKeyEvents.KeyAction.LONG_PRESS
+            -> DashcamVideoKeyEvents.KeyAction.RECORD
 
             else -> null
         }
@@ -74,7 +94,8 @@ object VideoKeyHandler {
         val pkg = context.packageName
         Log.i(
             VideoKeyReceiver.TAG,
-            "若按物理键无日志，请用 adb 测试广播是否可达:\n" +
+            "物理键映射: keyCode=${PhysicalKeyCodes.PHOTO}(拍照) keyCode=${PhysicalKeyCodes.RECORD}(录像)\n" +
+                "广播测试:\n" +
                 "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY} -p $pkg\n" +
                 "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_LONG_PRESS_VIDEO_KEY} -p $pkg",
         )

@@ -10,8 +10,10 @@ import kotlinx.coroutines.flow.asSharedFlow
  */
 object DashcamVideoKeyEvents {
     enum class KeyAction {
-        PRESS,
-        LONG_PRESS,
+        /** keyCode=142 拍照 */
+        PHOTO,
+        /** keyCode=136 录像 */
+        RECORD,
     }
 
     private val _events = MutableSharedFlow<KeyAction>(extraBufferCapacity = 1)

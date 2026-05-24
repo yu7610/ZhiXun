@@ -2,12 +2,10 @@ package com.powerchina.zhixun.physicalkey
 
 import android.content.Context
 import android.content.Intent
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
-import com.powerchina.zhixun.dashcam.DashcamVideoKeyEvents
+import com.powerchina.zhixun.dashcam.PhysicalKeyCodes
 import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 
@@ -17,11 +15,6 @@ import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 object PhysicalKeyInterceptor {
 
     private const val TAG = VideoKeyReceiver.TAG
-    private const val LONG_PRESS_MS = 600L
-
-    private val handler = Handler(Looper.getMainLooper())
-    private var longPressRunnable: Runnable? = null
-    private var longPressTriggered = false
 
     @Volatile
     var isAppInForeground: Boolean = false
@@ -29,9 +22,6 @@ object PhysicalKeyInterceptor {
 
     fun setAppInForeground(inForeground: Boolean) {
         isAppInForeground = inForeground
-        if (!inForeground) {
-            cancelPendingLongPress()
-        }
         Log.d(TAG, "物理键拦截: 前台=${inForeground}")
     }
 
@@ -43,8 +33,11 @@ object PhysicalKeyInterceptor {
         if (!shouldInterceptKeyEvent(event)) return false
 
         val keyCode = event.keyCode
-        if (isVideoRelatedKey(keyCode)) {
-            return dispatchVideoKeyEvent(context, event)
+        if (PhysicalKeyCodes.isMappedKey(keyCode)) {
+            return dispatchMappedKeyEvent(context, event)
+        }
+        if (isLegacyVideoRelatedKey(keyCode)) {
+            return dispatchLegacyVideoKeyEvent(context, event)
         }
 
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
@@ -65,49 +58,43 @@ object PhysicalKeyInterceptor {
         return VideoKeyHandler.handleBroadcast(context, intent)
     }
 
-    private fun dispatchVideoKeyEvent(context: Context, event: KeyEvent): Boolean {
+    /** keyCode=142 拍照、keyCode=136 录像：抬起时触发，不做短长按区分 */
+    private fun dispatchMappedKeyEvent(context: Context, event: KeyEvent): Boolean {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
-                if (event.repeatCount > 0) return true
-                longPressTriggered = false
-                cancelPendingLongPress()
-                longPressRunnable = Runnable {
-                    longPressTriggered = true
-                    Log.i(
+                if (event.repeatCount == 0) {
+                    Log.d(
                         TAG,
-                        "KeyEvent 长按 keyCode=${event.keyCode} " +
+                        "KeyEvent 按下 keyCode=${event.keyCode} " +
                             "(${KeyEvent.keyCodeToString(event.keyCode)})",
                     )
-                    VideoKeyHandler.handleKeyEvent(context, DashcamVideoKeyEvents.KeyAction.LONG_PRESS)
-                }.also { handler.postDelayed(it, LONG_PRESS_MS) }
-                Log.d(
-                    TAG,
-                    "KeyEvent 按下 keyCode=${event.keyCode} " +
-                        "(${KeyEvent.keyCodeToString(event.keyCode)})",
-                )
+                }
                 return true
             }
-
             KeyEvent.ACTION_UP -> {
-                cancelPendingLongPress()
-                if (!longPressTriggered) {
-                    Log.i(
-                        TAG,
-                        "KeyEvent 短按 keyCode=${event.keyCode} " +
-                            "(${KeyEvent.keyCodeToString(event.keyCode)})",
-                    )
-                    VideoKeyHandler.handleKeyEvent(context, DashcamVideoKeyEvents.KeyAction.PRESS)
-                }
-                longPressTriggered = false
+                Log.i(
+                    TAG,
+                    "KeyEvent 抬起 keyCode=${event.keyCode} " +
+                        "(${KeyEvent.keyCodeToString(event.keyCode)})",
+                )
+                VideoKeyHandler.handleKeyCode(context, event.keyCode)
                 return true
             }
         }
         return true
     }
 
-    private fun cancelPendingLongPress() {
-        longPressRunnable?.let { handler.removeCallbacks(it) }
-        longPressRunnable = null
+    /** 其它录像相关键：保留短按/长按兼容 */
+    private fun dispatchLegacyVideoKeyEvent(context: Context, event: KeyEvent): Boolean {
+        // 未映射的 legacy 键仅消费，避免触发系统行为
+        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            Log.d(
+                TAG,
+                "Legacy 录像键按下 keyCode=${event.keyCode} " +
+                    "(${KeyEvent.keyCodeToString(event.keyCode)})",
+            )
+        }
+        return true
     }
 
     /**
@@ -119,13 +106,12 @@ object PhysicalKeyInterceptor {
         val keyCode = event.keyCode
         if (keyCode in PASSTHROUGH_KEY_CODES) return false
 
-        if (isVideoRelatedKey(keyCode)) return true
+        if (PhysicalKeyCodes.isMappedKey(keyCode)) return true
+        if (isLegacyVideoRelatedKey(keyCode)) return true
         if (keyCode in HARDWARE_KEY_CODES) return true
 
-        // 执法仪部分按键上报为 UNKNOWN + scanCode
         if (keyCode == KeyEvent.KEYCODE_UNKNOWN && event.scanCode != 0) return true
 
-        // 外接实体键盘输入不拦截
         if (event.isFromSource(InputDevice.SOURCE_KEYBOARD) &&
             event.device != null &&
             event.device?.isVirtual == false &&
@@ -137,7 +123,10 @@ object PhysicalKeyInterceptor {
         return false
     }
 
-    fun isVideoRelatedKey(keyCode: Int): Boolean = keyCode in VIDEO_KEY_CODES
+    fun isVideoRelatedKey(keyCode: Int): Boolean =
+        PhysicalKeyCodes.isMappedKey(keyCode) || isLegacyVideoRelatedKey(keyCode)
+
+    private fun isLegacyVideoRelatedKey(keyCode: Int): Boolean = keyCode in LEGACY_VIDEO_KEY_CODES
 
     private val PASSTHROUGH_KEY_CODES = setOf(
         KeyEvent.KEYCODE_BACK,
@@ -147,12 +136,11 @@ object PhysicalKeyInterceptor {
         KeyEvent.KEYCODE_POWER,
     )
 
-    private val VIDEO_KEY_CODES = setOf(
+    private val LEGACY_VIDEO_KEY_CODES = setOf(
         KeyEvent.KEYCODE_CAMERA,
         KeyEvent.KEYCODE_MEDIA_RECORD,
         KeyEvent.KEYCODE_TV_MEDIA_CONTEXT_MENU,
         KeyEvent.KEYCODE_BUTTON_MODE,
-        KeyEvent.KEYCODE_F12,
         289,
         290,
     )
@@ -179,8 +167,8 @@ object PhysicalKeyInterceptor {
         KeyEvent.KEYCODE_MEDIA_STOP,
         KeyEvent.KEYCODE_MEDIA_NEXT,
         KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-        230, // KEYCODE_PTT（部分 API 无常量）
-        131, 132, 133, 134, 135, // 部分定制机
+        230,
+        131, 132, 133, 134, 135,
     )
 
     private fun isVirtualKeyEvent(event: KeyEvent): Boolean {

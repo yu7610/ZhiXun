@@ -14,11 +14,15 @@ import com.powerchina.zhixun.data.Message
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.data.XiaozhiConfig
 import com.powerchina.zhixun.network.WebSocketEvent
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
+import com.powerchina.zhixun.xiaozhi.PhotoResult
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 import com.powerchina.zhixun.xiaozhi.wake.WakePhraseMatcher
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
+import kotlin.coroutines.resume
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -115,6 +119,86 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             sessionManager.awaitingActivation.collect { _showActivationDialog.value = it }
         }
+        viewModelScope.launch {
+            XiaozhiAppEvents.photoResults.collect { result ->
+                onPhotoUploadResult(result)
+            }
+        }
+    }
+
+    private fun onPhotoUploadResult(result: PhotoResult) {
+        result.file?.let { file ->
+            addMessage(
+                Message(
+                    role = MessageRole.USER,
+                    content = "",
+                    imagePath = file.absolutePath,
+                ),
+            )
+        }
+        result.uploadResult
+            .onSuccess {
+                Log.i(TAG, "照片已上传小智 ${result.file?.name}")
+                _errorMessage.value = null
+                showPhotoVisionDescription(result.visionDescription)
+                if (_state.value == ConversationState.IDLE ||
+                    _state.value == ConversationState.LISTENING
+                ) {
+                    _state.value = ConversationState.PROCESSING
+                }
+                XiaozhiAppEvents.endPhotoSession()
+                resumeWakeListeningIfNeeded()
+            }
+            .onFailure { err ->
+                XiaozhiAppEvents.endPhotoSession()
+                _errorMessage.value = sanitizePhotoError(err.message)
+            }
+    }
+
+    private fun showPhotoVisionDescription(description: String?) {
+        val text = description?.trim().orEmpty()
+        if (text.isBlank()) {
+            Log.w(TAG, "视觉描述为空，无法展示")
+            return
+        }
+        val last = _messages.value.lastOrNull()
+        if (last?.role == MessageRole.ASSISTANT && last.content.trim() == text) {
+            return
+        }
+        addMessage(
+            Message(
+                role = MessageRole.ASSISTANT,
+                content = text,
+            ),
+        )
+        Log.i(TAG, "展示视觉描述 len=${text.length}")
+    }
+
+    private fun sanitizePhotoError(message: String?): String {
+        val raw = message?.trim().orEmpty()
+        if (raw.isBlank()) return "照片上传失败"
+        if (raw.startsWith("{") && raw.contains("\"success\"")) return "照片识别失败，请重试"
+        return raw
+    }
+
+    private fun isLikelyVisionJsonEcho(text: String): Boolean {
+        val trimmed = text.trim()
+        return trimmed.startsWith("{") &&
+            (trimmed.contains("\"success\"") || trimmed.contains("\"filename\""))
+    }
+
+    /** 本地已展示完整视觉描述时，避免 TTS/LLM 重复追加同一段文字 */
+    private fun shouldApplyServerAssistantText(incoming: String): Boolean {
+        val text = incoming.trim()
+        if (text.isBlank()) return false
+        val last = _messages.value.lastOrNull() ?: return true
+        if (last.role != MessageRole.ASSISTANT) return true
+        val current = last.content.trim()
+        if (current.isBlank()) return true
+        if (current == text || current.contains(text) || text.contains(current)) {
+            return false
+        }
+        return true
     }
 
     /**
@@ -137,8 +221,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private fun pauseConversationForUi() {
         val wakeHandoff = pendingVoiceWake || XiaozhiWakeCoordinator.isWakeHandoffInProgress()
-        if (wakeHandoff) {
-            Log.d(TAG, "唤醒交接中，跳过 UI 暂停清理")
+        if (wakeHandoff || XiaozhiAppEvents.isPhotoSessionActive()) {
+            Log.d(TAG, "唤醒交接/拍照会话中，跳过 UI 暂停清理")
             return
         }
 
@@ -240,6 +324,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun resumeWakeListeningIfNeeded() {
         if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
             Log.d(TAG, "唤醒交接中，不恢复后台监听")
+            return
+        }
+        if (XiaozhiAppEvents.isPhotoSessionActive()) {
+            Log.d(TAG, "拍照会话中，不恢复后台监听")
             return
         }
         if (_state.value != ConversationState.LISTENING && !pendingVoiceWake) {
@@ -472,6 +560,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * 后台唤醒监听或交接期间，忽略共享 WebSocket 上的对话消息。
      */
     private fun shouldIgnoreConversationServerMessages(): Boolean {
+        if (XiaozhiAppEvents.isPhotoSessionActive()) {
+            return false
+        }
         return pendingVoiceWake ||
             XiaozhiWakeCoordinator.isWakeHandoffInProgress() ||
             XiaozhiWakeForegroundService.isWakeListeningActive()
@@ -497,6 +588,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     if (!conversationUiActive) return@handleTextMessage
                     val text = json.get("text")?.asString
                     Log.d(TAG, "STT: $text")
+                    if (!text.isNullOrEmpty() && XiaozhiAppEvents.isPhotoSessionActive()) {
+                        if (isLikelyVisionJsonEcho(text)) {
+                            Log.d(TAG, "拍照会话中忽略视觉 JSON 回显")
+                            return@handleTextMessage
+                        }
+                        Log.d(TAG, "拍照会话中忽略 STT 回显")
+                        return@handleTextMessage
+                    }
                     if (!text.isNullOrEmpty() &&
                         WakePhraseMatcher.matches(text) &&
                         _state.value != ConversationState.LISTENING
@@ -520,7 +619,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     val emotion = json.get("emotion")?.asString
                     val text = json.get("text")?.asString
                     Log.d(TAG, "LLM emotion=$emotion text=$text")
-                    if (!text.isNullOrEmpty()) {
+                    if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
                         updateAssistantMessage(text)
                     }
                 }
@@ -531,14 +630,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         "sentence_start" -> {
                             // TTS句子开始，显示要播放的文本
                             val text = json.get("text")?.asString
-                            if (!text.isNullOrEmpty()) {
+                            if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
                                 updateAssistantMessage(text)
                             }
                         }
                         "sentence_end" -> {
                             // TTS句子结束，有时包含完整的句子内容
                             val text = json.get("text")?.asString
-                            if (!text.isNullOrEmpty()) {
+                            if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
                                 // 检查是否需要更新（如果sentence_start已经包含了这部分内容则跳过，或者直接替换为更完整的text）
                                 // 这里简单处理：如果当前最后一条助手消息内容不包含这段text，则更新/追加
                                 Log.d(TAG, "TTS sentence_end: $text")
@@ -562,6 +661,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         "stop" -> {
                             audioManager.stopPlaying()
                             Log.d(TAG, "TTS stop")
+                            if (XiaozhiAppEvents.isPhotoSessionActive()) {
+                                XiaozhiAppEvents.endPhotoSession()
+                                resumeWakeListeningIfNeeded()
+                            }
                             if (!conversationUiActive) {
                                 if (isAutoMode) shouldResumeOnUiReturn = true
                                 return@handleTextMessage
@@ -890,12 +993,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     private fun handleMCPMessage(message: String) {
         Log.d(TAG, "MCP: $message")
-        
-        // 添加MCP消息到对话列表（可选）
-        addMessage(Message(
-            role = MessageRole.SYSTEM,
-            content = "MCP: $message"
-        ))
     }
 
     override fun onCleared() {

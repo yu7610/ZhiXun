@@ -4,6 +4,8 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
+import java.io.File
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,29 +42,42 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
 
     fun bindCameraSession(session: DashcamCameraSession?) {
         cameraSession = session
+        SharedCameraCapture.dashcamSession = session
         if (session != null) {
             tryAutoStartRecording()
         }
     }
 
     fun takePhoto() {
-        val session = cameraSession
-        if (session == null) {
-            _message.value = "相机未就绪"
-            return
-        }
-        if (_isRecording.value) {
-            _message.value = "录像中无法拍照"
-            return
-        }
-        val file = DashcamRecordingStore.createPhotoFile(app)
-        session.takePicture(file) { result ->
+        capturePhoto { result ->
             result.onSuccess {
                 _message.value = "照片已保存：${it.name}"
             }.onFailure {
                 _message.value = it.message ?: "拍照失败"
             }
         }
+    }
+
+    /** 拍照并在聊天界面展示、上传小智（不跳转页面） */
+    fun takePhotoAndShareToChat() {
+        capturePhoto { result ->
+            result.onSuccess { file ->
+                _message.value = "照片已保存：${file.name}"
+                XiaozhiAppEvents.sharePhotoToChat(file)
+            }.onFailure { err ->
+                _message.value = err.message ?: "拍照失败"
+            }
+        }
+    }
+
+    private fun capturePhoto(onResult: (Result<File>) -> Unit) {
+        val session = cameraSession
+        if (session == null) {
+            onResult(Result.failure(IllegalStateException("相机未就绪")))
+            return
+        }
+        val file = DashcamRecordingStore.createPhotoFile(app)
+        session.takePicture(file, onResult)
     }
 
     fun stopRecordingIfActive() {
@@ -72,7 +87,6 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** 进入应用后相机就绪即自动开始录像，并保持录制 */
     fun tryAutoStartRecording() {
         val controller = recordingController ?: return
         if (userStoppedRecording || _isRecording.value) return
@@ -80,7 +94,6 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         startRecording(controller)
     }
 
-    /** 相机重新绑定时自动续录 */
     fun ensureRecordingContinues() {
         if (userStoppedRecording || _isRecording.value) return
         tryAutoStartRecording()
@@ -109,34 +122,27 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    /** 物理录像键：短按切换录像；长按在未录制时开始录制，录制中则停止 */
+    /** 物理录像键：keyCode=136 切换录像 */
     fun onVideoKey(action: DashcamVideoKeyEvents.KeyAction) {
+        if (action != DashcamVideoKeyEvents.KeyAction.RECORD) return
         Log.i(
             VideoKeyReceiver.TAG,
             "onVideoKey: action=$action, isRecording=${_isRecording.value}, " +
                 "cameraReady=${recordingController != null}",
         )
-        when (action) {
-            DashcamVideoKeyEvents.KeyAction.PRESS -> {
-                Log.d(VideoKeyReceiver.TAG, "短按 -> toggleRecording")
-                toggleRecording()
-            }
-            DashcamVideoKeyEvents.KeyAction.LONG_PRESS -> {
-                if (_isRecording.value) {
-                    Log.d(VideoKeyReceiver.TAG, "长按 -> 停止录像")
-                    userStoppedRecording = true
-                    stopRecording()
-                } else {
-                    Log.d(VideoKeyReceiver.TAG, "长按 -> 开始录像")
-                    userStoppedRecording = false
-                    val controller = recordingController
-                    if (controller == null) {
-                        Log.w(VideoKeyReceiver.TAG, "长按失败: 相机未就绪")
-                        _message.value = "相机未就绪"
-                    } else {
-                        startRecording(controller)
-                    }
-                }
+        if (_isRecording.value) {
+            Log.d(VideoKeyReceiver.TAG, "长按 -> 停止录像")
+            userStoppedRecording = true
+            stopRecording()
+        } else {
+            Log.d(VideoKeyReceiver.TAG, "长按 -> 开始录像")
+            userStoppedRecording = false
+            val controller = recordingController
+            if (controller == null) {
+                Log.w(VideoKeyReceiver.TAG, "长按失败: 相机未就绪")
+                _message.value = "相机未就绪"
+            } else {
+                startRecording(controller)
             }
         }
     }
@@ -189,6 +195,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     override fun onCleared() {
+        SharedCameraCapture.dashcamSession = null
         if (_isRecording.value) {
             recordingController?.stopRecording { _ -> refreshClips() }
         }

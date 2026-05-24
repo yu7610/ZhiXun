@@ -331,6 +331,9 @@ class WebSocketManager(private val context: Context) {
             addProperty("type", "hello")
             addProperty("version", 1)
             addProperty("transport", "websocket")
+            add("features", JsonObject().apply {
+                addProperty("mcp", true)
+            })
             add("audio_params", JsonObject().apply {
                 addProperty("format", "opus")
                 addProperty("sample_rate", 16000)
@@ -400,7 +403,12 @@ class WebSocketManager(private val context: Context) {
             try {
                 val success = webSocket!!.send(message)
                 if (success) {
-                    Log.d(TAG, "发送文本消息: $message")
+                    val logBody = if (message.length > 500) {
+                        "${message.take(200)}...(len=${message.length})"
+                    } else {
+                        message
+                    }
+                    Log.d(TAG, "发送文本消息: $logBody")
                 } else {
                     Log.w(TAG, "发送文本消息失败，WebSocket可能已关闭")
                 }
@@ -433,10 +441,187 @@ class WebSocketManager(private val context: Context) {
     }
 
     /**
+     * 发送图片消息（JPEG base64，兼容 type=img 协议草案）
+     */
+    fun sendImage(jpegBytes: ByteArray, mimeType: String = "image/jpeg") {
+        if (!isConnected() || !isHandshakeComplete || webSocket == null) {
+            Log.w(TAG, "WebSocket未就绪，无法发送图片")
+            return
+        }
+        val rawBase64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
+        val message = JsonObject().apply {
+            sessionId?.let { addProperty("session_id", it) }
+            addProperty("type", "img")
+            addProperty("mime", mimeType)
+            addProperty("base64", rawBase64)
+        }
+        val json = gson.toJson(message)
+        Log.i(TAG, "发送图片消息 jpeg=${jpegBytes.size}B base64=${rawBase64.length} session=$sessionId")
+        sendRawTextMessage(json)
+    }
+
+    /** 携带图片的 detect 提问（部分服务端在此字段取图） */
+    fun sendVisionDetectWithImage(text: String, jpegBytes: ByteArray) {
+        if (!isConnected() || !isHandshakeComplete || webSocket == null) {
+            Log.w(TAG, "WebSocket未就绪，无法发送视觉提问")
+            return
+        }
+        val rawBase64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
+        val dataUri = "data:image/jpeg;base64,$rawBase64"
+        val message = JsonObject().apply {
+            sessionId?.let { addProperty("session_id", it) }
+            addProperty("type", "listen")
+            addProperty("state", "detect")
+            addProperty("text", text)
+            addProperty("source", "camera")
+            addProperty("mime", "image/jpeg")
+            addProperty("image", dataUri)
+            addProperty("base64", rawBase64)
+        }
+        sendRawTextMessage(gson.toJson(message))
+        Log.i(TAG, "发送视觉提问(含图片): $text jpeg=${jpegBytes.size}B")
+    }
+
+    /** 图片识别后的文本提问 */
+    fun sendVisionQuery(text: String) {
+        val message = JsonObject().apply {
+            sessionId?.let { addProperty("session_id", it) }
+            addProperty("type", "listen")
+            addProperty("state", "detect")
+            addProperty("text", text)
+            addProperty("source", "text")
+        }
+        sendRawTextMessage(gson.toJson(message))
+        Log.i(TAG, "发送视觉提问: $text")
+    }
+
+    /**
      * 发送文本请求（兼容旧接口）
      */
     fun sendTextRequest(text: String) {
-        sendWakeWordDetected(text)
+        sendVisionQuery(text)
+    }
+
+    private fun sendRawTextMessage(message: String) {
+        if (!isConnected() || webSocket == null) {
+            Log.w(TAG, "WebSocket未就绪，无法发送消息")
+            return
+        }
+        try {
+            val success = webSocket!!.send(message)
+            if (!success) {
+                Log.w(TAG, "发送消息失败，WebSocket可能已关闭")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "发送消息异常", e)
+        }
+    }
+
+    fun sendMcpPayload(payload: JsonObject) {
+        if (!isConnected() || !isHandshakeComplete || webSocket == null) {
+            Log.w(TAG, "WebSocket未就绪，无法发送 MCP")
+            return
+        }
+        val message = JsonObject().apply {
+            sessionId?.let { addProperty("session_id", it) }
+            addProperty("type", "mcp")
+            add("payload", payload)
+        }
+        sendRawTextMessage(gson.toJson(message))
+    }
+
+    fun sendMcpInitializeResult(id: Int) {
+        val result = JsonObject().apply {
+            addProperty("protocolVersion", "2024-11-05")
+            add(
+                "capabilities",
+                JsonObject().apply {
+                    add("tools", JsonObject())
+                },
+            )
+            add(
+                "serverInfo",
+                JsonObject().apply {
+                    addProperty("name", "zhixun-android")
+                    addProperty("version", "1.0.0")
+                },
+            )
+        }
+        sendMcpPayload(
+            JsonObject().apply {
+                addProperty("jsonrpc", "2.0")
+                addProperty("id", id)
+                add("result", result)
+            },
+        )
+    }
+
+    fun sendMcpToolsListResult(id: Int) {
+        val tool = JsonObject().apply {
+            addProperty("name", "self.camera.take_photo")
+            addProperty(
+                "description",
+                "Take a photo with the device camera and explain it.",
+            )
+            add(
+                "inputSchema",
+                JsonObject().apply {
+                    addProperty("type", "object")
+                    add(
+                        "properties",
+                        JsonObject().apply {
+                            add(
+                                "question",
+                                JsonObject().apply {
+                                    addProperty("type", "string")
+                                },
+                            )
+                        },
+                    )
+                    add("required", com.google.gson.JsonArray().apply { add("question") })
+                },
+            )
+        }
+        val tools = com.google.gson.JsonArray()
+        tools.add(tool)
+        sendMcpPayload(
+            JsonObject().apply {
+                addProperty("jsonrpc", "2.0")
+                addProperty("id", id)
+                add(
+                    "result",
+                    JsonObject().apply {
+                        add("tools", tools)
+                        addProperty("nextCursor", "")
+                    },
+                )
+            },
+        )
+    }
+
+    fun sendMcpToolResult(id: Int, result: JsonObject) {
+        sendMcpPayload(
+            JsonObject().apply {
+                addProperty("jsonrpc", "2.0")
+                addProperty("id", id)
+                add("result", result)
+            },
+        )
+    }
+
+    fun sendMcpError(id: Int, message: String) {
+        sendMcpPayload(
+            JsonObject().apply {
+                addProperty("jsonrpc", "2.0")
+                addProperty("id", id)
+                add(
+                    "error",
+                    JsonObject().apply {
+                        addProperty("message", message)
+                    },
+                )
+            },
+        )
     }
 
     /**

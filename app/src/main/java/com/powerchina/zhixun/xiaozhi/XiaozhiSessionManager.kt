@@ -61,6 +61,7 @@ class XiaozhiSessionManager private constructor(
                     is WebSocketEvent.Disconnected -> {
                         _isConnected.value = false
                         _isConnecting.value = false
+                        XiaozhiVisionRegistry.clear()
                         Log.i(TAG, "WebSocket Disconnected")
                     }
                     is WebSocketEvent.Error -> {

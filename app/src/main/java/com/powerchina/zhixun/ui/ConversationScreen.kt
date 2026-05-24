@@ -1,7 +1,9 @@
 package com.powerchina.zhixun.ui
 
 import android.app.Activity
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalOverscrollConfiguration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.LocationOn
@@ -59,7 +63,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
@@ -78,6 +84,7 @@ import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.viewmodel.ConversationState
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
+import java.io.File
 import kotlinx.coroutines.launch
 
 private val AuraBgTop = Color(0xFFF8F9FF)
@@ -107,6 +114,7 @@ fun ConversationScreen(
 
     val permissionsState = rememberMultiplePermissionsState(
         permissions = buildList {
+            add(android.Manifest.permission.CAMERA)
             add(android.Manifest.permission.RECORD_AUDIO)
             add(android.Manifest.permission.MODIFY_AUDIO_SETTINGS)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
@@ -180,6 +188,14 @@ private fun MainConversationContent(
         scope.launch { snackbarHostState.showSnackbar(featureComingText) }
     }
 
+    LaunchedEffect(errorMessage) {
+        val message = errorMessage?.trim().orEmpty()
+        if (message.isNotBlank()) {
+            snackbarHostState.showSnackbar(message)
+            viewModel.clearError()
+        }
+    }
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -225,19 +241,6 @@ private fun MainConversationContent(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
-                )
-            }
-
-            if (!errorMessage.isNullOrBlank()) {
-                Text(
-                    text = errorMessage,
-                    color = Color(0xFFBA1A1A),
-                    fontSize = 12.sp,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .zIndex(2f)
-                        .padding(bottom = 24.dp, start = 24.dp, end = 24.dp),
-                    textAlign = TextAlign.Center,
                 )
             }
         }
@@ -418,8 +421,8 @@ private fun MessageList(
 ) {
     val listState = rememberLazyListState()
 
-    // 自动滚动到底部：当消息数量变化或最后一条消息内容变化时触发
-    val lastMessageContent = messages.lastOrNull()?.content
+    // 自动滚动到底部：当消息数量、内容或图片变化时触发
+    val lastMessageContent = messages.lastOrNull()?.let { "${it.content}:${it.imagePath}" }
     LaunchedEffect(messages.size, lastMessageContent) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
@@ -448,29 +451,64 @@ private fun ChatBubble(message: Message) {
     val alignment = if (isUser) Alignment.End else Alignment.Start
     val backgroundColor = if (isUser) AuraPrimary else Color.White
     val contentColor = if (isUser) Color.White else AuraText
-    val shape = if (isUser) {
+    val textShape = if (isUser) {
         RoundedCornerShape(20.dp, 4.dp, 20.dp, 20.dp)
     } else {
         RoundedCornerShape(4.dp, 20.dp, 20.dp, 20.dp)
     }
+    val imageShape = if (isUser) {
+        RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp)
+    } else {
+        RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp)
+    }
+    val imageBitmap = remember(message.imagePath) {
+        message.imagePath?.let { path ->
+            if (File(path).exists()) {
+                BitmapFactory.decodeFile(path)?.asImageBitmap()
+            } else {
+                null
+            }
+        }
+    }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = alignment
+        horizontalAlignment = alignment,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Surface(
-            color = backgroundColor,
-            shape = shape,
-            shadowElevation = 2.dp,
-            modifier = Modifier.widthIn(max = 280.dp)
-        ) {
-            Text(
-                text = message.content,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                color = contentColor,
-                fontSize = 15.sp,
-                lineHeight = 22.sp
-            )
+        imageBitmap?.let { bitmap ->
+            Surface(
+                color = Color.White,
+                shape = imageShape,
+                shadowElevation = 2.dp,
+                modifier = Modifier.widthIn(max = 220.dp),
+            ) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = "照片",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(4f / 3f)
+                        .clip(imageShape),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+        if (message.content.isNotBlank()) {
+            Surface(
+                color = backgroundColor,
+                shape = textShape,
+                shadowElevation = 2.dp,
+                modifier = Modifier.widthIn(max = 280.dp),
+            ) {
+                Text(
+                    text = message.content,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    color = contentColor,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                )
+            }
         }
     }
 }

@@ -118,10 +118,12 @@ fun DashcamScreen(
     }
 
     LaunchedEffect(Unit) {
-        Log.d(VideoKeyReceiver.TAG, "DashcamScreen: 开始监听物理录像键事件")
+        Log.d(VideoKeyReceiver.TAG, "DashcamScreen: 监听录像键 keyCode=${PhysicalKeyCodes.RECORD}")
         DashcamVideoKeyEvents.events.collect { keyAction ->
             if (!permissionsState.allPermissionsGranted) return@collect
-            viewModel.onVideoKey(keyAction)
+            if (keyAction == DashcamVideoKeyEvents.KeyAction.RECORD) {
+                viewModel.onVideoKey(keyAction)
+            }
         }
     }
 
@@ -202,11 +204,9 @@ fun DashcamScreen(
                 onAudio = {
                     scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_feature_coming)) }
                 },
-                onPhoto = { viewModel.takePhoto() },
+                onPhoto = { viewModel.takePhotoAndShareToChat() },
                 onRecordToggle = { viewModel.toggleRecording() },
-                onUpload = {
-                    scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_feature_coming)) }
-                },
+                onUpload = { viewModel.takePhotoAndShareToChat() },
                 onPlayback = {
                     if (clips.isEmpty()) {
                         scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_no_clip_playback)) }

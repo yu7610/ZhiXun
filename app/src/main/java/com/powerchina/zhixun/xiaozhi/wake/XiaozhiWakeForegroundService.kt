@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.powerchina.zhixun.MainActivity
 import com.powerchina.zhixun.R
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 /**
  * 后台/息屏持续监听「你好」的前台服务。
  */
@@ -199,6 +200,10 @@ class XiaozhiWakeForegroundService : Service() {
 
         fun ensureListeningActive(context: Context) {
             val appContext = context.applicationContext
+            if (XiaozhiAppEvents.isPhotoSessionActive()) {
+                Log.d(TAG, "拍照会话中，不恢复监听")
+                return
+            }
             if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
                 Log.d(TAG, "唤醒交接中，不恢复监听")
                 return

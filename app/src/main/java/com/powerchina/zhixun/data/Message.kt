@@ -17,5 +17,7 @@ data class Message(
     val role: MessageRole,
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val isAudio: Boolean = false
+    val isAudio: Boolean = false,
+    /** 本地照片路径，用于聊天界面展示 */
+    val imagePath: String? = null,
 )
