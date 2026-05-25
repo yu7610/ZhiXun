@@ -485,7 +485,7 @@ class EnhancedAudioManager(private val context: Context) {
     /**
      * 获取播放状态
      */
-    fun isPlaying(): Boolean = isPlayingState
+    fun isPlaying(): Boolean = streamPlayer?.isCurrentlyPlaying() == true || isPlayingState
     
     /**
      * 测试音频播放（生成一个简单的测试音调）

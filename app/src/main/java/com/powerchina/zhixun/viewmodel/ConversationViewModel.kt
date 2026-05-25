@@ -23,10 +23,12 @@ import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 /**
  * 对话状态
@@ -165,9 +167,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     /** 问候阶段已发送 listen/start（开麦时无需重复发送） */
     private var wakeGreetingListenActive = false
 
-    /** 用户说了「退下」等：等待服务器回复 TTS，播完后再待机；此期间不主动 stopListening/断连 */
+    /** 用户说了「退下」等：等待结束语播完 → 断开重连 → 待机唤醒 */
     private var pendingSessionEnd = false
     private var sessionEndFallbackJob: Job? = null
+    private var sessionEndStandbyJob: Job? = null
+    private var sessionEndReconnectPending = false
+    private var sessionEndAudioReceived = false
+    private var sessionEndTtsStopSeen = false
     private var standbyReadyPollJob: Job? = null
 
     init {
@@ -720,10 +726,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         pendingRecordKeyStart = false
         pendingVoiceWake = false
         pendingAutoStart = false
+        cancelSessionEndFallback()
+        cancelSessionEndStandby()
         pendingSessionEnd = false
+        sessionEndAudioReceived = false
+        sessionEndTtsStopSeen = false
+        sessionEndReconnectPending = false
         XiaozhiAppEvents.acknowledgeVoiceKeyEvent()
         cancelSpeakingWatchdog()
-        cancelSessionEndFallback()
         isAutoMode = false
         audioManager.stopRecording()
         audioManager.stopPlaying()
@@ -1075,16 +1085,109 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         sessionEndFallbackJob = null
     }
 
+    private fun cancelSessionEndStandby() {
+        sessionEndStandbyJob?.cancel()
+        sessionEndStandbyJob = null
+    }
+
     private fun scheduleSessionEndFallback() {
         cancelSessionEndFallback()
         sessionEndFallbackJob = viewModelScope.launch {
             delay(20_000)
             if (!pendingSessionEnd) return@launch
-            Log.w(TAG, "结束语等待超时，进入待机")
-            Log.w(SESSION_END_TAG, "20s 内未收到完整结束语，强制进入待机")
-            pendingSessionEnd = false
-            enterStandby("session_end_timeout", notifyServer = true, fastWake = true)
+            Log.w(TAG, "结束语等待超时，强制断开重连")
+            Log.w(SESSION_END_TAG, "20s 内未收到完整结束语，强制断开重连")
+            scheduleSessionEndCompletion("session_end_timeout")
         }
+    }
+
+    /** 结束语 tts stop 后等待 AudioTrack 播完，再关闭任务并断开重连 */
+    private fun scheduleSessionEndCompletion(trigger: String) {
+        if (sessionEndStandbyJob?.isActive == true) return
+        sessionEndStandbyJob = viewModelScope.launch {
+            cancelSessionEndFallback()
+            logFlow("sessionEnd.awaitPlayback", "trigger=$trigger play=${audioManager.isPlaying()}")
+            Log.i(SESSION_END_TAG, "等待结束语播完 trigger=$trigger")
+            awaitSessionEndPlayback()
+            if (!pendingSessionEnd && trigger != "session_end_timeout") return@launch
+            finalizeSessionEndAndReconnect(trigger)
+        }
+    }
+
+    private suspend fun awaitSessionEndPlayback(timeoutMs: Long = 10_000L) {
+        if (!sessionEndAudioReceived && !audioManager.isPlaying()) {
+            delay(200)
+            return
+        }
+        try {
+            withTimeout(6_000L) {
+                audioManager.waitForPlaybackCompletion()
+            }
+            delay(200)
+            Log.d(TAG, "结束语播放完成（waitForPlaybackCompletion）")
+            return
+        } catch (_: TimeoutCancellationException) {
+            Log.d(TAG, "结束语 waitForPlaybackCompletion 超时，轮询播放状态")
+        }
+        var idleSince = 0L
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!audioManager.isPlaying()) {
+                if (idleSince == 0L) idleSince = System.currentTimeMillis()
+                if (System.currentTimeMillis() - idleSince >= 300) {
+                    Log.d(TAG, "结束语播放完成（轮询 isPlaying）")
+                    return
+                }
+            } else {
+                idleSince = 0L
+            }
+            delay(50)
+        }
+        Log.w(TAG, "结束语播放等待超时，仍执行断开重连")
+    }
+
+    /** 关闭对话相关任务，断开 WebSocket 并立即重连，恢复唤醒待机 */
+    private fun finalizeSessionEndAndReconnect(trigger: String) {
+        shutdownAllConversationTasks()
+        pendingSessionEnd = false
+        sessionEndAudioReceived = false
+        sessionEndTtsStopSeen = false
+        audioManager.stopRecording()
+        audioManager.stopPlaying()
+        audioManager.releaseRecorderOnly()
+        isAudioInitialized = false
+        XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
+        clearWakeConversationHandoff("session_end")
+        transitionState(ConversationState.IDLE, "session_end:$trigger")
+        Log.i(TAG, "结束语完成($trigger) → 关闭任务并断开重连")
+        Log.i(SESSION_END_TAG, "结束语播完，断开 WebSocket 并重连")
+        logFlow("sessionEnd.complete", "trigger=$trigger")
+        sessionManager.disconnect()
+        sessionEndReconnectPending = true
+        _isAwaitingReconnect.value = true
+        transitionState(ConversationState.CONNECTING, "session_end_reconnect")
+        sessionManager.ensureConnected()
+        sessionEndStandbyJob = null
+    }
+
+    private fun shutdownAllConversationTasks() {
+        cancelListenHandoff()
+        cancelSpeakingWatchdog()
+        cancelSessionEndFallback()
+        stopListeningKeepalive()
+        standbyReadyPollJob?.cancel()
+        standbyReadyPollJob = null
+        pendingWakeRetryJob?.cancel()
+        pendingWakeRetryJob = null
+        pendingRecordKeyRetryJob?.cancel()
+        pendingRecordKeyRetryJob = null
+        pendingAutoStart = false
+        pendingVoiceWake = false
+        pendingRecordKeyStart = false
+        isAutoMode = false
+        wakeConversationHandoff = false
+        setWakeGreetingPlaying(false)
+        clearWakeGreetingSuppression()
     }
 
     private fun cancelSpeakingWatchdog() {
@@ -1093,7 +1196,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun scheduleSpeakingWatchdog() {
-        if (isWakeGreetingTurn() || _isWakeGreetingPlaying.value || listenHandoffJob?.isActive == true) {
+        if (isWakeGreetingTurn() || _isWakeGreetingPlaying.value ||
+            listenHandoffJob?.isActive == true || pendingSessionEnd
+        ) {
             VoiceFlowLog.step("tts.watchdog", "跳过（唤醒问候/交接中）")
             return
         }
@@ -1174,14 +1279,18 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             Log.d(TAG, "聆听中忽略迟来 TTS stop")
             return
         }
+        if (pendingSessionEnd && !sessionEndTtsStopSeen) {
+            VoiceFlowLog.decision("tts.finish", "处理", false, "结束语等待 tts stop")
+            Log.d(TAG, "结束语等待中，忽略 TTS finish($trigger)")
+            return
+        }
         if (pendingSessionEnd) {
-            audioManager.stopRecording()
-            pendingSessionEnd = false
-            cancelSessionEndFallback()
-            Log.i(TAG, "结束语播完 → 待机（不主动断开 WebSocket）")
-            Log.i(SESSION_END_TAG, "结束语 TTS 播完，进入待机")
-            logFlow("sessionEnd.ttsDone", "trigger=$trigger")
-            enterStandby("session_end_tts", notifyServer = true, fastWake = true)
+            sessionEndTtsStopSeen = true
+            cancelSpeakingWatchdog()
+            Log.i(TAG, "结束语 TTS stop → 等待播完再断开重连")
+            Log.i(SESSION_END_TAG, "结束语 TTS stop，等待 AudioTrack 播完")
+            logFlow("sessionEnd.ttsStop", "trigger=$trigger play=${audioManager.isPlaying()}")
+            scheduleSessionEndCompletion(trigger)
             return
         }
         if (isAutoMode && _isConnected.value && conversationUiActive &&
@@ -1248,8 +1357,12 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         cancelListenHandoff()
         cancelSpeakingWatchdog()
         cancelSessionEndFallback()
+        cancelSessionEndStandby()
         stopListeningKeepalive()
         pendingSessionEnd = false
+        sessionEndAudioReceived = false
+        sessionEndTtsStopSeen = false
+        sessionEndReconnectPending = false
         pendingVoiceWake = false
         pendingAutoStart = false
         isAutoMode = false
@@ -1491,6 +1604,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 if (_state.value == ConversationState.CONNECTING) {
                     _state.value = ConversationState.IDLE
                 }
+                if (sessionEndReconnectPending) {
+                    sessionEndReconnectPending = false
+                    Log.i(TAG, "退下重连完成 → 恢复唤醒待机")
+                    logFlow("sessionEnd.reconnected", "session=${webSocketManager.getSessionId()}")
+                    prepareStandbyWakeListening()
+                    return
+                }
                 tryHandlePendingVoiceWake()
                 tryHandlePendingRecordKeyStart()
                 if (pendingAutoStart) {
@@ -1663,6 +1783,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         addMessage(Message(role = MessageRole.USER, content = text))
                         audioManager.stopRecording()
                         pendingSessionEnd = true
+                        sessionEndAudioReceived = false
+                        sessionEndTtsStopSeen = false
                         isAutoMode = false
                         transitionState(ConversationState.PROCESSING, "session_end_stt")
                         beginSessionEndWindDown()
@@ -1903,6 +2025,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             return
         }
         if (pendingSessionEnd) {
+            sessionEndAudioReceived = true
             logSessionEndServerReply("binary", "tts_audio ${data.size} bytes")
         }
         if (isWakeGreetingTurn() && _state.value != ConversationState.CONNECTING) {
