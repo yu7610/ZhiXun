@@ -181,7 +181,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     if (_state.value == ConversationState.CONNECTING) {
                         _state.value = ConversationState.IDLE
                     }
-                    tryStartAutoConversationIfNeeded()
+                    if (pendingAutoStart && isAutoMode) {
+                        tryStartAutoConversationIfNeeded()
+                    }
                 } else {
                     _isAwaitingReconnect.value = webSocketManager.isAutoReconnectEnabled() &&
                         _state.value == ConversationState.CONNECTING
@@ -649,8 +651,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         val current = _state.value
-        resumeManualListening = current == ConversationState.LISTENING && !isAutoMode
-        shouldResumeOnUiReturn = isAutoMode || resumeManualListening
+        shouldResumeOnUiReturn = false
+        resumeManualListening = false
 
         audioManager.stopRecording()
         audioManager.stopPlaying()
@@ -674,18 +676,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             resumeManualListening = false
             return
         }
-        Log.d(TAG, "对话页返回 resumeOnReturn=$shouldResumeOnUiReturn connected=${_isConnected.value}")
-        if (!_isConnected.value) return
-        if (!shouldResumeOnUiReturn) return
-        val manual = resumeManualListening
         shouldResumeOnUiReturn = false
         resumeManualListening = false
-        if (isAutoMode) {
-            tryStartAutoConversationIfNeeded()
-        } else if (manual) {
-            startListening()
-        }
+        Log.d(TAG, "对话页返回 connected=${_isConnected.value}（待机仅按键/唤醒可开聊）")
         tryHandlePendingVoiceWake()
+        tryHandlePendingRecordKeyStart()
     }
 
     /**
@@ -930,8 +925,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         setWakeGreetingPlaying(false)
     }
 
-    /** WakeSTT 路径的 tts start 常早于 onVoiceWakeDetected，提前进入问候窗口 */
+    /** 仅 WakeSTT 命中唤醒词后的交接期才提前进入问候窗口 */
+    private fun shouldArmWakeGreetingFromServerTts(): Boolean =
+        XiaozhiWakeCoordinator.hasServerGreetingTtsPending() &&
+            XiaozhiWakeCoordinator.isWakeHandoffInProgress()
+
+    /** WakeSTT 命中唤醒词后、onVoiceWakeDetected 之前，server tts 可能已到达 */
     private fun armWakeGreetingFromServerTtsIfNeeded() {
+        if (!shouldArmWakeGreetingFromServerTts()) return
         if (isWakeGreetingWindow()) return
         scheduleWakeGreetingSuppression()
         if (_messages.value.none {
@@ -1183,7 +1184,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             enterStandby("session_end_tts", notifyServer = true, fastWake = true)
             return
         }
-        if (isAutoMode && _isConnected.value && conversationUiActive) {
+        if (isAutoMode && _isConnected.value && conversationUiActive &&
+            (pendingVoiceWake || wakeConversationHandoff ||
+                XiaozhiWakeCoordinator.isWakeHandoffInProgress() ||
+                listenHandoffJob?.isActive == true ||
+                _state.value == ConversationState.LISTENING ||
+                _state.value == ConversationState.PROCESSING)
+        ) {
             audioManager.stopPlaying()
             if (_state.value == ConversationState.SPEAKING) {
                 audioManager.stopRecording()
@@ -1360,15 +1367,23 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /**
+     * 尝试开麦：待机 IDLE 仅响应按键/唤醒；已开聊的 auto 会话可续轮。
+     */
     private fun tryStartAutoConversationIfNeeded() {
         if (pendingVoiceWake) {
             tryHandlePendingVoiceWake()
             return
         }
-        if (pendingRecordKeyStart) {
+        if (pendingRecordKeyStart || XiaozhiAppEvents.hasPendingVoiceKeyPress()) {
             tryHandlePendingRecordKeyStart()
             return
         }
+        if (_state.value == ConversationState.IDLE && !pendingAutoStart) {
+            Log.d(TAG, "待机态，跳过自动开麦（需录音键或唤醒词）")
+            return
+        }
+        if (!isAutoMode) return
         if (XiaozhiWakeForegroundService.isWakeListeningActive()) {
             Log.d(TAG, "唤醒监听中，跳过自动开麦")
             return
@@ -1431,7 +1446,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
             tryHandlePendingVoiceWake()
             tryHandlePendingRecordKeyStart()
-            if (_state.value == ConversationState.IDLE) {
+            if (pendingAutoStart && isAutoMode) {
                 tryStartAutoConversationIfNeeded()
             }
             return
@@ -1480,8 +1495,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 tryHandlePendingRecordKeyStart()
                 if (pendingAutoStart) {
                     initializeAudio()
-                } else {
-                    tryStartAutoConversationIfNeeded()
                 }
                 if (!XiaozhiWakeForegroundService.isWakeListeningHealthy()) {
                     resumeWakeListeningIfNeeded()
@@ -1571,7 +1584,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         if (isWakeGreetingWindow()) {
             return false
         }
-        if (XiaozhiWakeCoordinator.hasServerGreetingTtsPending()) {
+        if (XiaozhiWakeCoordinator.hasServerGreetingTtsPending() &&
+            XiaozhiWakeCoordinator.isWakeHandoffInProgress()
+        ) {
             return false
         }
         return pendingVoiceWake ||
@@ -1718,10 +1733,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         }
                         "start" -> {
                             if (!conversationUiActive) return@handleTextMessage
-                            if (XiaozhiWakeCoordinator.hasServerGreetingTtsPending()) {
+                            if (shouldArmWakeGreetingFromServerTts()) {
                                 armWakeGreetingFromServerTtsIfNeeded()
                                 markWakeGreetingTtsStart()
-                                Log.d(TAG, "WakeSTT 路径问候 TTS start（早于唤醒回调）")
+                                Log.d(TAG, "WakeSTT 路径问候 TTS start（唤醒交接中）")
                                 return@handleTextMessage
                             }
                             if (listenHandoffJob?.isActive == true && !isWakeGreetingWindow()) {
@@ -1872,7 +1887,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * 处理二进制消息（音频数据）
      */
     private fun handleBinaryMessage(data: ByteArray) {
-        if (XiaozhiWakeCoordinator.hasServerGreetingTtsPending() && conversationUiActive) {
+        if (shouldArmWakeGreetingFromServerTts() && conversationUiActive) {
             armWakeGreetingFromServerTtsIfNeeded()
             if (!wakeGreetingTtsStartSeen) {
                 markWakeGreetingTtsStart()
@@ -1925,21 +1940,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     @SuppressLint("MissingPermission")
     fun startListening() {
-        if (_state.value != ConversationState.IDLE || !_isConnected.value) {
-            return
-        }
-        if (!ensureRecordingReady()) return
-
-        isAutoMode = false
-        _state.value = ConversationState.LISTENING
-        if (!audioManager.startRecording()) {
-            _state.value = ConversationState.IDLE
-            return
-        }
-
-        webSocketManager.sendStartListening("manual")
-        pauseWakeListening()
-        Log.i(TAG, "开始手动聆听")
+        Log.d(TAG, "手动开麦已禁用，请使用录音键或唤醒词")
     }
 
     /**

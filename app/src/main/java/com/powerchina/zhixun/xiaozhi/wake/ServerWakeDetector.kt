@@ -265,18 +265,16 @@ class ServerWakeDetector(
         try {
             val json = gson.fromJson(message, JsonObject::class.java)
             when (json.get("type")?.asString) {
-                "tts" -> {
-                    val state = json.get("state")?.asString
-                    if (state == "start") {
-                        XiaozhiWakeCoordinator.onServerGreetingTtsStart()
-                    }
-                }
                 "stt" -> {
                     val text = json.get("text")?.asString ?: return
                     val matched = WakePhraseMatcher.matches(text)
                     Log.i(TAG, "STT: \"$text\" matched=$matched")
                     if (matched) {
                         triggerWake()
+                    } else if (text.isNotBlank()) {
+                        Log.i(TAG, "非唤醒词，abort 误触发对话")
+                        VoiceFlowLog.step("wakeSTT.rejectStt", "text=$text")
+                        webSocket.sendAbort("not_wake_word")
                     }
                 }
             }
@@ -299,6 +297,7 @@ class ServerWakeDetector(
         eventJob?.cancel()
         eventJob = null
         // 勿 abort/stopListening：服务端已对 WakeSTT 上行开始问候 TTS，打断后只剩文字无 Opus
+        XiaozhiWakeCoordinator.onServerGreetingTtsStart()
         stopAudio()
         releaseWakeLock()
         mainHandler.post { onWakeDetected() }
