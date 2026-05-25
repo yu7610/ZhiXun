@@ -138,6 +138,7 @@ fun ConversationScreen(
     val isAwaitingReconnect by viewModel.isAwaitingReconnect.collectAsState()
     val isSessionConnecting by viewModel.isSessionConnecting.collectAsState()
     val isWakeGreetingPlaying by viewModel.isWakeGreetingPlaying.collectAsState()
+    val isWakeHandoffActive by viewModel.isWakeHandoffActive.collectAsState()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -172,6 +173,7 @@ fun ConversationScreen(
         isAwaitingReconnect = isAwaitingReconnect,
         isSessionConnecting = isSessionConnecting,
         isWakeGreetingPlaying = isWakeGreetingPlaying,
+        isWakeHandoffActive = isWakeHandoffActive,
         onShowSettings = onNavigateToSettings,
         onBack = onBack,
         showActivationDialog = showActivationDialog,
@@ -190,6 +192,7 @@ private fun MainConversationContent(
     isAwaitingReconnect: Boolean,
     isSessionConnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
+    isWakeHandoffActive: Boolean,
     onShowSettings: () -> Unit,
     onBack: (() -> Unit)?,
     showActivationDialog: Boolean,
@@ -263,6 +266,7 @@ private fun MainConversationContent(
                 isAwaitingReconnect = isAwaitingReconnect,
                 isSessionConnecting = isSessionConnecting,
                 isWakeGreetingPlaying = isWakeGreetingPlaying,
+                isWakeHandoffActive = isWakeHandoffActive,
                 onShowSettings = onShowSettings,
                 onLocationClick = onFeatureComing,
                 onScreenRecordClick = onScreenRecordClick,
@@ -354,6 +358,7 @@ private fun TopBar(
     isAwaitingReconnect: Boolean,
     isSessionConnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
+    isWakeHandoffActive: Boolean,
     onShowSettings: () -> Unit,
     onLocationClick: () -> Unit,
     onScreenRecordClick: () -> Unit,
@@ -369,6 +374,7 @@ private fun TopBar(
         isAwaitingReconnect = isAwaitingReconnect,
         isSessionConnecting = isSessionConnecting,
         isWakeGreetingPlaying = isWakeGreetingPlaying,
+        isWakeHandoffActive = isWakeHandoffActive,
     )
 
     Box(
@@ -450,20 +456,27 @@ private fun statusLabel(
     isAwaitingReconnect: Boolean,
     isSessionConnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
+    isWakeHandoffActive: Boolean,
 ): String {
-    if (isWakeGreetingPlaying && state == ConversationState.LISTENING) {
+    if (isWakeGreetingPlaying &&
+        (state == ConversationState.LISTENING ||
+            state == ConversationState.IDLE ||
+            state == ConversationState.SPEAKING)
+    ) {
         return stringResource(R.string.status_speaking)
+    }
+    if (isWakeHandoffActive && state == ConversationState.IDLE && isConnected && !isWakeGreetingPlaying) {
+        return stringResource(R.string.status_listening)
     }
     return when (state) {
         ConversationState.LISTENING -> stringResource(R.string.status_listening)
         ConversationState.PROCESSING -> stringResource(R.string.status_processing)
         ConversationState.SPEAKING -> stringResource(R.string.status_speaking)
         ConversationState.CONNECTING -> stringResource(R.string.status_connecting)
-        ConversationState.IDLE -> when {
-            isAwaitingReconnect || isSessionConnecting -> stringResource(R.string.status_connecting)
-            !isConnected -> stringResource(R.string.status_disconnected)
-            isStandbyReady -> stringResource(R.string.status_standby)
-            else -> stringResource(R.string.status_connecting)
+        ConversationState.IDLE -> if (isStandbyReady) {
+            stringResource(R.string.status_standby)
+        } else {
+            stringResource(R.string.status_connecting)
         }
     }
 }

@@ -68,7 +68,22 @@ class EnhancedAudioManager(private val context: Context) {
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun initialize(): Boolean {
         return try {
+            isPlayingState = false
+            isPlaybackSetup = false
+            playbackJob?.cancel()
+            playbackJob = null
+            try {
+                streamPlayer?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                streamPlayer?.release()
+            } catch (_: Exception) {
+            }
+            streamPlayer = null
             // 初始化Opus编解码器
+            opusEncoder?.release()
+            opusDecoder?.release()
             opusEncoder = OpusEncoder(RECORD_SAMPLE_RATE, 1, FRAME_DURATION_MS)
             opusDecoder = OpusDecoder(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS)
             streamPlayer = OpusStreamPlayer(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS, context)
@@ -107,6 +122,38 @@ class EnhancedAudioManager(private val context: Context) {
     }
 
     fun isPlaybackReady(): Boolean = opusDecoder != null && streamPlayer != null
+
+    fun isPlaybackPipelineActive(): Boolean = isPlaybackSetup
+
+    /**
+     * 重建下行播放链路（待机→唤醒、stopPlaying 后再次问候时使用）。
+     */
+    fun reprepareDownlinkPlayback(): Boolean {
+        return try {
+            isPlayingState = false
+            isPlaybackSetup = false
+            playbackJob?.cancel()
+            playbackJob = null
+            try {
+                streamPlayer?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                streamPlayer?.release()
+            } catch (_: Exception) {
+            }
+            streamPlayer = OpusStreamPlayer(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS, context)
+            if (opusDecoder == null) {
+                opusDecoder = OpusDecoder(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS)
+            }
+            setupAudioPlayback()
+            Log.d(TAG, "下行播放链路已重建")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "重建下行播放链路失败", e)
+            false
+        }
+    }
 
     /**
      * 设置录音器

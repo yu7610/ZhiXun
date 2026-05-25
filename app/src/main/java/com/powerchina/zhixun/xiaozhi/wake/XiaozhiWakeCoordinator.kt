@@ -11,6 +11,7 @@ import com.powerchina.zhixun.MainActivity
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.physicalkey.PhysicalKeyInterceptor
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
+import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 
 /**
@@ -20,7 +21,7 @@ object XiaozhiWakeCoordinator {
 
     private const val TAG = "WakeCoord"
     private const val DEBOUNCE_MS = 3000L
-    private const val HANDOFF_TIMEOUT_MS = 15_000L
+    private const val HANDOFF_TIMEOUT_MS = 25_000L
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -30,11 +31,23 @@ object XiaozhiWakeCoordinator {
     @Volatile
     private var wakeHandoffInProgress = false
 
+    /**
+     * WakeSTT 上行已触发服务端问候 TTS（tts start 常早于 STT 命中）。
+     * 交接期间勿 sendStopListening/abort，否则服务端只回文字不发 Opus。
+     */
+    @Volatile
+    private var serverGreetingTtsPending = false
+
     private val handoffTimeoutRunnable = Runnable {
         if (!wakeHandoffInProgress) return@Runnable
+        val ctx = appContextForHandoff ?: return@Runnable
+        if (XiaozhiWakeForegroundService.isConversationMicClaimed()) {
+            Log.w(TAG, "唤醒交接超时但对话仍占用麦克风，延长等待")
+            scheduleHandoffTimeout(ctx)
+            return@Runnable
+        }
         wakeHandoffInProgress = false
         Log.w(TAG, "唤醒交接超时，恢复后台监听")
-        val ctx = appContextForHandoff ?: return@Runnable
         XiaozhiWakeForegroundService.resumeListening(ctx)
     }
 
@@ -43,9 +56,30 @@ object XiaozhiWakeCoordinator {
 
     fun isWakeHandoffInProgress(): Boolean = wakeHandoffInProgress
 
+    fun onServerGreetingTtsStart() {
+        serverGreetingTtsPending = true
+        VoiceFlowLog.step("wakeCoord.greetingTts", "WakeSTT 路径 server tts start")
+    }
+
+    fun hasServerGreetingTtsPending(): Boolean = serverGreetingTtsPending
+
+    fun clearServerGreetingTtsPending() {
+        serverGreetingTtsPending = false
+    }
+
+    /** 问候 TTS 进行中：暂停唤醒推流，但不向服务端发 listen/stop */
+    fun shouldDeferWakeStopListening(): Boolean =
+        wakeHandoffInProgress || serverGreetingTtsPending
+
+    fun refreshHandoffTimeout(context: Context) {
+        if (!wakeHandoffInProgress) return
+        scheduleHandoffTimeout(context.applicationContext)
+    }
+
     fun clearWakeHandoff(reason: String) {
         if (!wakeHandoffInProgress) return
         wakeHandoffInProgress = false
+        serverGreetingTtsPending = false
         mainHandler.removeCallbacks(handoffTimeoutRunnable)
         Log.d(TAG, "唤醒交接完成: $reason")
     }

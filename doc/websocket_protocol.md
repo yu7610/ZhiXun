@@ -115,8 +115,8 @@ OTA（可选）→ 取得 wss URL → WebSocketManager.connect(url, deviceId, to
 
 - WebSocket **二进制帧** → `BinaryMessage` → `audioManager.playAudio`
 - 解码：`OpusDecoder` → `AudioTrack` 播放
-- **仅在对话态播放**（`SPEAKING` / `LISTENING` / `PROCESSING`）；`IDLE` 收到的二进制帧视为 abort 后迟回，丢弃
-- **唤醒问候窗口**（detect 后约 15s）：允许在 `IDLE`/`LISTENING` 播放问候 TTS，不切 `SPEAKING`、不打断开麦
+- **SPEAKING** 态播放 TTS；LISTENING 且正在录音时忽略下行（与官方设备一致，避免与麦克风冲突）
+- 唤醒问候：`tts start` 后切 **SPEAKING** 播放，**tts stop** 后再 `listen/start` 开麦
 
 ### 6.3 Listen 会话续期
 
@@ -132,6 +132,15 @@ connect → hello 握手 → Connected
   → tts start → SPEAKING → 二进制下行播放
   → tts stop → 自动模式 startNextRound() 或 IDLE
 disconnect / 错误 → Disconnected（对话中自动重连并恢复开麦，不进入待机）
+```
+
+### 7.1 语音唤醒（官方 xiaozhi-esp32）
+
+```
+WakeSTT 命中 → abort(wake_word_detected) + listen/stop
+  → listen/detect（仅 detect，此时不开麦不上行）
+  → 服务器 tts start → 客户端 SPEAKING → 二进制下行播放
+  → 服务器 tts stop → listen/start + 开麦 → LISTENING
 ```
 
 **断线恢复（对话中）**：`LISTENING`/`PROCESSING`/`SPEAKING` + 自动模式 → `CONNECTING` + `pendingAutoStart`，重连后 `initializeAudio()` 恢复聆听。

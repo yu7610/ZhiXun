@@ -131,6 +131,10 @@ class XiaozhiWakeForegroundService : Service() {
             Log.d(TAG, "对话占用中，跳过")
             return
         }
+        if (micClaimedByConversation) {
+            Log.d(TAG, "对话已声明麦克风，跳过")
+            return
+        }
         if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
             Log.d(TAG, "唤醒交接中，跳过")
             return
@@ -369,6 +373,10 @@ class XiaozhiWakeForegroundService : Service() {
 
         fun resumeListening(context: Context) {
             val appContext = context.applicationContext
+            if (micClaimedByConversation) {
+                Log.d(TAG, "对话占用麦克风，不 resume")
+                return
+            }
             if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
                 Log.d(TAG, "唤醒交接中，不 resume")
                 return

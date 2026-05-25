@@ -140,7 +140,13 @@ class ServerWakeDetector(
         streamingJob = null
         unregisterTextListener()
         stopAudio()
-        webSocket.sendStopListening()
+        if (XiaozhiWakeCoordinator.shouldDeferWakeStopListening()) {
+            Log.d(TAG, "问候 TTS 交接中，pause 不发送 stopListening")
+        } else if (!XiaozhiWakeForegroundService.isConversationMicClaimed()) {
+            webSocket.sendStopListening()
+        } else {
+            Log.d(TAG, "对话占用麦克风，pause 不发送 stopListening")
+        }
     }
 
     override fun stop() {
@@ -259,6 +265,12 @@ class ServerWakeDetector(
         try {
             val json = gson.fromJson(message, JsonObject::class.java)
             when (json.get("type")?.asString) {
+                "tts" -> {
+                    val state = json.get("state")?.asString
+                    if (state == "start") {
+                        XiaozhiWakeCoordinator.onServerGreetingTtsStart()
+                    }
+                }
                 "stt" -> {
                     val text = json.get("text")?.asString ?: return
                     val matched = WakePhraseMatcher.matches(text)
@@ -286,9 +298,7 @@ class ServerWakeDetector(
         streamingJob = null
         eventJob?.cancel()
         eventJob = null
-        // 取消服务端对已识别唤醒词的 TTS 回复，避免与对话页冲突
-        webSocket.sendAbort("wake_handoff")
-        webSocket.sendStopListening()
+        // 勿 abort/stopListening：服务端已对 WakeSTT 上行开始问候 TTS，打断后只剩文字无 Opus
         stopAudio()
         releaseWakeLock()
         mainHandler.post { onWakeDetected() }
