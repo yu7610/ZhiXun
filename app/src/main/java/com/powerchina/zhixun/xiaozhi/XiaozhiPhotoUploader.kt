@@ -11,7 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * 将执法仪照片压缩后上传隐患检测 HTTP 接口，并将结果发送到小智对话。
+ * 将执法仪照片压缩后上传隐患检测 HTTP 接口；识别结果仅本地展示，不发送给小智。
  */
 object XiaozhiPhotoUploader {
 
@@ -25,12 +25,8 @@ object XiaozhiPhotoUploader {
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val visionResult = uploadPhotoForMcp(application, photoFile, prompt).getOrThrow()
-            val sessionManager = XiaozhiSessionManager.getInstance(application)
-            val webSocket = sessionManager.webSocketManager
-            waitForConnection(webSocket)
             val displayText = XiaozhiVisionClient.displayTextFromResult(visionResult)
-            webSocket.sendVisionQuery(displayText)
-            Log.i(TAG, "已发送视觉结果到对话 len=${displayText.length}")
+            Log.i(TAG, "视觉结果仅本地展示 len=${displayText.length}")
             displayText
         }.onFailure { e ->
             Log.e(TAG, "上传照片失败", e)

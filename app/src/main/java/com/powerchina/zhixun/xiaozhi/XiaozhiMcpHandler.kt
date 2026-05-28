@@ -111,6 +111,13 @@ object XiaozhiMcpHandler {
             XiaozhiWakeForegroundService.pauseListening(app)
             try {
                 val photoFile = capturePhoto(app) ?: throw IllegalStateException("拍照失败")
+                XiaozhiAppEvents.emitPhotoResult(
+                    PhotoResult(
+                        file = photoFile,
+                        uploadResult = Result.success(Unit),
+                        captureOnly = true,
+                    ),
+                )
                 val upload = XiaozhiPhotoUploader.uploadPhotoForMcp(
                     application = app,
                     photoFile = photoFile,

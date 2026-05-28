@@ -18,6 +18,8 @@ data class PhotoResult(
     val uploadResult: Result<Unit>,
     /** HTTP 视觉接口返回的描述文本（已解析，非原始 JSON） */
     val visionDescription: String? = null,
+    /** 拍照完成、识别尚未返回时先发预览 */
+    val captureOnly: Boolean = false,
 )
 
 /**
@@ -120,6 +122,15 @@ object XiaozhiAppEvents {
 
     fun isPhotoSessionActive(): Boolean = photoSessionActive
 
+    /** 对话页 Compose 是否在前台（用于拍照时避免重复拉起 Activity） */
+    @Volatile
+    var conversationScreenVisible: Boolean = false
+        private set
+
+    fun setConversationScreenVisible(visible: Boolean) {
+        conversationScreenVisible = visible
+    }
+
     fun requestOpenConversation(
         autoConnect: Boolean = false,
         fromVoiceWake: Boolean = false,
@@ -178,7 +189,8 @@ object XiaozhiAppEvents {
         val emitted = _photoResults.tryEmit(result)
         Log.i(
             TAG,
-            "emitPhotoResult file=${result.file?.name} success=${result.uploadResult.isSuccess} emitted=$emitted",
+            "emitPhotoResult file=${result.file?.name} captureOnly=${result.captureOnly} " +
+                "success=${result.uploadResult.isSuccess} emitted=$emitted",
         )
     }
 

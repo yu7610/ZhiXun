@@ -454,50 +454,8 @@ class WebSocketManager(private val context: Context) {
         }
     }
 
-    /**
-     * 发送图片消息（JPEG base64，兼容 type=img 协议草案）
-     */
-    fun sendImage(jpegBytes: ByteArray, mimeType: String = "image/jpeg") {
-        if (!isConnected() || !isHandshakeComplete || webSocket == null) {
-            Log.w(TAG, "WebSocket未就绪，无法发送图片")
-            return
-        }
-        val rawBase64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
-        val message = JsonObject().apply {
-            sessionId?.let { addProperty("session_id", it) }
-            addProperty("type", "img")
-            addProperty("mime", mimeType)
-            addProperty("base64", rawBase64)
-        }
-        val json = gson.toJson(message)
-        Log.i(TAG, "发送图片消息 jpeg=${jpegBytes.size}B base64=${rawBase64.length} session=$sessionId")
-        sendRawTextMessage(json)
-    }
-
-    /** 携带图片的 detect 提问（部分服务端在此字段取图） */
-    fun sendVisionDetectWithImage(text: String, jpegBytes: ByteArray) {
-        if (!isConnected() || !isHandshakeComplete || webSocket == null) {
-            Log.w(TAG, "WebSocket未就绪，无法发送视觉提问")
-            return
-        }
-        val rawBase64 = android.util.Base64.encodeToString(jpegBytes, android.util.Base64.NO_WRAP)
-        val dataUri = "data:image/jpeg;base64,$rawBase64"
-        val message = JsonObject().apply {
-            sessionId?.let { addProperty("session_id", it) }
-            addProperty("type", "listen")
-            addProperty("state", "detect")
-            addProperty("text", text)
-            addProperty("source", "camera")
-            addProperty("mime", "image/jpeg")
-            addProperty("image", dataUri)
-            addProperty("base64", rawBase64)
-        }
-        sendRawTextMessage(gson.toJson(message))
-        Log.i(TAG, "发送视觉提问(含图片): $text jpeg=${jpegBytes.size}B")
-    }
-
-    /** 图片识别后的文本提问 */
-    fun sendVisionQuery(text: String) {
+    /** 图片识别后的文本提问（sendTextRequest 内部使用） */
+    private fun sendVisionQuery(text: String) {
         val message = JsonObject().apply {
             sessionId?.let { addProperty("session_id", it) }
             addProperty("type", "listen")

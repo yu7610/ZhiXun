@@ -76,6 +76,10 @@ object XiaozhiPhotoCoordinator {
     }
 
     private fun bringConversationToFront(application: Application) {
+        if (XiaozhiAppEvents.conversationScreenVisible) {
+            Log.d(TAG, "已在对话页前台，跳过 Activity 拉起")
+            return
+        }
         val intent = Intent(application, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(MainActivity.EXTRA_OPEN_XIAOZHI, true)
@@ -94,6 +98,13 @@ object XiaozhiPhotoCoordinator {
             )
             return
         }
+        XiaozhiAppEvents.emitPhotoResult(
+            PhotoResult(
+                file = photoFile,
+                uploadResult = Result.success(Unit),
+                captureOnly = true,
+            ),
+        )
         val uploadResult = XiaozhiPhotoUploader.uploadPhoto(
             application = application,
             photoFile = photoFile,

@@ -444,6 +444,11 @@ class EnhancedAudioManager(private val context: Context) {
     }
 
     /**
+     * 检查录音权限
+     */
+    fun hasRecordPermission(): Boolean = checkPermissions()
+
+    /**
      * 检查权限
      */
     private fun checkPermissions(): Boolean {
