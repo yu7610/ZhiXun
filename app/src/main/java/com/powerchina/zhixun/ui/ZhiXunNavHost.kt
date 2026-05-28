@@ -47,11 +47,11 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
         }
 
         LaunchedEffect(Unit) {
-            XiaozhiAppEvents.photoCaptureRequests.collect {
-                Log.i(TAG, "收到物理键拍照请求")
+            XiaozhiAppEvents.photoKeyRequests.collect {
+                Log.i(TAG, "收到物理拍照键请求")
                 val cfg = configManager.loadConfig()
                 if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
-                    Log.w(TAG, "未配置，无法拍照上传")
+                    Log.w(TAG, "未配置，无法发送拍照指令")
                     return@collect
                 }
                 conversationViewModel.updateConfig(cfg)
@@ -62,6 +62,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                         launchSingleTop = true
                     }
                 }
+                conversationViewModel.onPhotoKeyPressed()
             }
         }
 

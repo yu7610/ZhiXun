@@ -141,6 +141,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     // 物理录音键（138）待连接后开麦
     private var pendingRecordKeyStart = false
+    /** 待机拍照键：连接成功后发送 detect */
+    private var pendingPhotoFromStandby = false
+    /** 拍照键已展示用户气泡，忽略随后 STT 回显 */
+    private var suppressPhotoSttEcho = false
     private var pendingRecordKeyRetryJob: Job? = null
     private var pendingRecordKeyRetryCount = 0
 
@@ -184,6 +188,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 if (connected) {
                     tryHandlePendingVoiceWake()
                     tryHandlePendingRecordKeyStart()
+                    tryHandlePendingPhotoKey()
                     if (_state.value == ConversationState.CONNECTING) {
                         _state.value = ConversationState.IDLE
                     }
@@ -248,7 +253,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     _state.value = ConversationState.PROCESSING
                 }
                 XiaozhiAppEvents.endPhotoSession()
-                resumeWakeListeningIfNeeded()
             }
             .onFailure { err ->
                 XiaozhiAppEvents.endPhotoSession()
@@ -332,6 +336,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
             tryHandlePendingVoiceWake()
             tryHandlePendingRecordKeyStart()
+            tryHandlePendingPhotoKey()
         }
         updateStandbyReady()
         if (active) {
@@ -721,6 +726,122 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         tryHandlePendingRecordKeyStart()
     }
 
+    /**
+     * 物理拍照键（142）：
+     * - 待机 → 发送「拍照」唤醒 detect
+     * - 聆听 → 直接发送「拍照」文字
+     * - 其他状态忽略
+     */
+    fun onPhotoKeyPressed() {
+        if (!XiaozhiAppEvents.consumePhotoKeyPressEvent()) {
+            Log.d(TAG, "拍照键：重复事件忽略")
+            return
+        }
+        if (!conversationUiActive) {
+            Log.d(TAG, "拍照键：对话页未就绪")
+            pendingPhotoFromStandby = true
+            return
+        }
+        if (XiaozhiAppEvents.isPhotoSessionActive()) {
+            Log.d(TAG, "拍照键：拍照会话进行中，忽略")
+            return
+        }
+        when (_state.value) {
+            ConversationState.IDLE -> sendPhotoWakeFromStandby()
+            ConversationState.LISTENING -> sendPhotoTextInConversation()
+            else -> Log.d(TAG, "拍照键：仅待机/聆听可用，当前=${_state.value}")
+        }
+    }
+
+    private fun tryHandlePendingPhotoKey() {
+        if (!pendingPhotoFromStandby) return
+        if (!conversationUiActive || !_isConnected.value) return
+        if (_state.value != ConversationState.IDLE) {
+            pendingPhotoFromStandby = false
+            return
+        }
+        pendingPhotoFromStandby = false
+        executePhotoWakeDetect()
+    }
+
+    private fun sendPhotoWakeFromStandby() {
+        if (_state.value != ConversationState.IDLE) {
+            Log.d(TAG, "待机拍照：非 IDLE state=${_state.value}")
+            return
+        }
+        if (pendingSessionEnd || pendingVoiceWake || isWakeHandoffInProgress()) {
+            Log.d(TAG, "待机拍照：交接/结束语中，忽略")
+            return
+        }
+        if (!_isConnected.value) {
+            pendingPhotoFromStandby = true
+            connect()
+            Log.d(TAG, "待机拍照：等待 WebSocket 连接")
+            return
+        }
+        executePhotoWakeDetect()
+    }
+
+    private fun executePhotoWakeDetect() {
+        if (_state.value != ConversationState.IDLE || !_isConnected.value) return
+        pauseWakeListening()
+        webSocketManager.sendStopListening()
+        suppressPhotoSttEcho = true
+        showPhotoPhraseAsUserMessage(WakePhraseMatcher.PHOTO_PHRASE)
+        webSocketManager.sendWakeWordDetected(WakePhraseMatcher.PHOTO_PHRASE)
+        isAutoMode = true
+        pendingAutoStart = false
+        transitionState(ConversationState.PROCESSING, "photo_wake_detect")
+        Log.i(TAG, "待机拍照键：发送唤醒 detect「${WakePhraseMatcher.PHOTO_PHRASE}」")
+        VoiceFlowLog.snapshot("photoKey.standby", "detect=${WakePhraseMatcher.PHOTO_PHRASE}")
+    }
+
+    private fun sendPhotoTextInConversation() {
+        if (_state.value != ConversationState.LISTENING || !_isConnected.value) {
+            Log.d(TAG, "聆听拍照：状态不可用 state=${_state.value} connected=${_isConnected.value}")
+            return
+        }
+        if (pendingSessionEnd) {
+            Log.d(TAG, "聆听拍照：结束语等待中，忽略")
+            return
+        }
+        audioManager.stopRecording()
+        webSocketManager.sendStopListening()
+        suppressPhotoSttEcho = true
+        isAutoMode = true
+        pendingAutoStart = false
+        showPhotoPhraseAsUserMessage(WakePhraseMatcher.PHOTO_PHRASE)
+        webSocketManager.sendVisionQuery(WakePhraseMatcher.PHOTO_PHRASE)
+        transitionState(ConversationState.PROCESSING, "photo_key_listening")
+        Log.i(TAG, "聆听拍照键：发送文字「${WakePhraseMatcher.PHOTO_PHRASE}」")
+        VoiceFlowLog.snapshot("photoKey.listening", "text=${WakePhraseMatcher.PHOTO_PHRASE}")
+    }
+
+    private fun shouldSuppressPhotoSttEcho(text: String?): Boolean {
+        if (!suppressPhotoSttEcho) return false
+        val normalized = text?.trim()
+            ?.replace("，", "")
+            ?.replace("。", "")
+            ?.replace("！", "")
+            ?.replace("!", "")
+            ?.replace("？", "")
+            ?.replace("?", "")
+            .orEmpty()
+        if (normalized != WakePhraseMatcher.PHOTO_PHRASE) return false
+        suppressPhotoSttEcho = false
+        return true
+    }
+
+    private fun showPhotoPhraseAsUserMessage(phrase: String) {
+        val trimmed = phrase.trim()
+        if (trimmed.isBlank()) return
+        val last = _messages.value.lastOrNull()
+        if (last?.role == MessageRole.USER && last.content.trim() == trimmed) return
+        addMessage(Message(role = MessageRole.USER, content = trimmed))
+        currentUserMessage = trimmed
+        Log.d(TAG, "展示拍照指令: $trimmed")
+    }
+
     private fun stopConversationFromVoiceKey() {
         cancelListenHandoff()
         pendingRecordKeyStart = false
@@ -732,6 +853,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         sessionEndAudioReceived = false
         sessionEndTtsStopSeen = false
         sessionEndReconnectPending = false
+        suppressPhotoSttEcho = false
         XiaozhiAppEvents.acknowledgeVoiceKeyEvent()
         cancelSpeakingWatchdog()
         isAutoMode = false
@@ -1055,6 +1177,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     fun onConversationScreenReady() {
         connect()
+        if (pendingPhotoFromStandby) {
+            tryHandlePendingPhotoKey()
+            updateStandbyReady()
+            return
+        }
         if (pendingVoiceWake || pendingRecordKeyStart || XiaozhiAppEvents.hasPendingVoiceKeyPress()) {
             initializeAudio()
             if (pendingRecordKeyStart || XiaozhiAppEvents.hasPendingVoiceKeyPress()) {
@@ -1294,11 +1421,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             return
         }
         if (isAutoMode && _isConnected.value && conversationUiActive &&
-            (pendingVoiceWake || wakeConversationHandoff ||
-                XiaozhiWakeCoordinator.isWakeHandoffInProgress() ||
-                listenHandoffJob?.isActive == true ||
+            (_state.value == ConversationState.SPEAKING ||
                 _state.value == ConversationState.LISTENING ||
-                _state.value == ConversationState.PROCESSING)
+                _state.value == ConversationState.PROCESSING ||
+                pendingVoiceWake ||
+                wakeConversationHandoff ||
+                XiaozhiWakeCoordinator.isWakeHandoffInProgress() ||
+                listenHandoffJob?.isActive == true)
         ) {
             audioManager.stopPlaying()
             if (_state.value == ConversationState.SPEAKING) {
@@ -1363,6 +1492,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         sessionEndAudioReceived = false
         sessionEndTtsStopSeen = false
         sessionEndReconnectPending = false
+        suppressPhotoSttEcho = false
         pendingVoiceWake = false
         pendingAutoStart = false
         isAutoMode = false
@@ -1486,6 +1616,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun tryStartAutoConversationIfNeeded() {
         if (pendingVoiceWake) {
             tryHandlePendingVoiceWake()
+            return
+        }
+        if (pendingPhotoFromStandby) {
+            tryHandlePendingPhotoKey()
             return
         }
         if (pendingRecordKeyStart || XiaozhiAppEvents.hasPendingVoiceKeyPress()) {
@@ -1613,6 +1747,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 }
                 tryHandlePendingVoiceWake()
                 tryHandlePendingRecordKeyStart()
+                tryHandlePendingPhotoKey()
                 if (pendingAutoStart) {
                     initializeAudio()
                 }
@@ -1753,6 +1888,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                         return@handleTextMessage
                     }
                     Log.d(TAG, "STT: $text")
+                    if (shouldSuppressPhotoSttEcho(text)) {
+                        Log.d(TAG, "忽略拍照 STT 回显: $text")
+                        return@handleTextMessage
+                    }
                     if (!text.isNullOrEmpty() && XiaozhiAppEvents.isPhotoSessionActive()) {
                         if (isLikelyVisionJsonEcho(text)) {
                             Log.d(TAG, "拍照会话中忽略视觉 JSON 回显")

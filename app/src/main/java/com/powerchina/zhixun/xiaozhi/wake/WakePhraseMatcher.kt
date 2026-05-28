@@ -7,6 +7,9 @@ object WakePhraseMatcher {
 
     const val WAKE_PHRASE = "你好，智询"
 
+    /** 物理拍照键在待机态发送的 detect 文案 */
+    const val PHOTO_PHRASE = "拍照"
+
     private const val CORE = "你好智询"
 
     /** STT 常把「智询」误识为同音字 */

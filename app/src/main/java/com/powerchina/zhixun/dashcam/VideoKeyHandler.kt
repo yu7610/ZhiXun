@@ -3,6 +3,8 @@ package com.powerchina.zhixun.dashcam
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.powerchina.zhixun.MainActivity
+import com.powerchina.zhixun.physicalkey.PhysicalKeyInterceptor
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 
 /**
@@ -58,8 +60,8 @@ object VideoKeyHandler {
         )
         return when (keyAction) {
             DashcamVideoKeyEvents.KeyAction.PHOTO -> {
-                Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.PHOTO} 拍照 -> 上传聊天")
-                XiaozhiAppEvents.requestPhotoCapture()
+                Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.PHOTO} 拍照键 -> 发送拍照指令")
+                dispatchPhotoKey(context)
                 true
             }
             DashcamVideoKeyEvents.KeyAction.RECORD -> {
@@ -88,6 +90,20 @@ object VideoKeyHandler {
 
             else -> null
         }
+    }
+
+    private fun dispatchPhotoKey(context: Context) {
+        if (PhysicalKeyInterceptor.isAppInForeground) {
+            XiaozhiAppEvents.requestPhotoKeyPress()
+            return
+        }
+        val launchIntent = Intent(context, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(MainActivity.EXTRA_OPEN_XIAOZHI, true)
+            putExtra(MainActivity.EXTRA_AUTO_CONNECT, true)
+            putExtra(MainActivity.EXTRA_PHOTO_KEY, true)
+        }
+        context.startActivity(launchIntent)
     }
 
     fun logTestCommands(context: Context) {

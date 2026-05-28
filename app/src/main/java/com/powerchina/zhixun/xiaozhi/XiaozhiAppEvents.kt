@@ -53,11 +53,25 @@ object XiaozhiAppEvents {
     var pendingVoiceKeyPress: Boolean = false
         private set
 
+    /** 物理拍照键待处理（SharedFlow 丢失时兜底） */
+    @Volatile
+    var pendingPhotoKeyPress: Boolean = false
+        private set
+
     @Volatile
     private var voiceKeyEpoch: Long = 0L
 
     @Volatile
     private var lastConsumedVoiceKeyEpoch: Long = -1L
+
+    @Volatile
+    private var photoKeyEpoch: Long = 0L
+
+    @Volatile
+    private var lastConsumedPhotoKeyEpoch: Long = -1L
+
+    private val _photoKeyRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val photoKeyRequests: SharedFlow<Unit> = _photoKeyRequests.asSharedFlow()
 
     fun markPendingVoiceKeyPress() {
         pendingVoiceKeyPress = true
@@ -130,6 +144,24 @@ object XiaozhiAppEvents {
         voiceKeyEpoch++
         pendingVoiceKeyPress = true
         requestOpenConversation(autoConnect = true, startVoiceOnConnect = true)
+    }
+
+    fun requestPhotoKeyPress() {
+        photoKeyEpoch++
+        pendingPhotoKeyPress = true
+        val emitted = _photoKeyRequests.tryEmit(Unit)
+        Log.i(TAG, "requestPhotoKeyPress emitted=$emitted")
+    }
+
+    fun hasPendingPhotoKeyPress(): Boolean = pendingPhotoKeyPress
+
+    fun consumePhotoKeyPressEvent(): Boolean {
+        if (photoKeyEpoch == lastConsumedPhotoKeyEpoch) {
+            return false
+        }
+        lastConsumedPhotoKeyEpoch = photoKeyEpoch
+        pendingPhotoKeyPress = false
+        return true
     }
 
     fun requestPhotoCapture() {

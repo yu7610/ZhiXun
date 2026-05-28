@@ -57,11 +57,12 @@ class MainActivity : ComponentActivity() {
         val wake = intent.getBooleanExtra(EXTRA_WAKE_FROM_VOICE, false)
         val autoConnect = intent.getBooleanExtra(EXTRA_AUTO_CONNECT, false)
         val startVoice = intent.getBooleanExtra(EXTRA_START_VOICE, false)
-        Log.i(TAG, "handleOpenXiaozhiIntent wake=$wake autoConnect=$autoConnect voice=$startVoice")
-        if (startVoice) {
-            XiaozhiAppEvents.requestVoiceConversation()
-        } else {
-            XiaozhiAppEvents.requestOpenConversation(
+        val photoKey = intent.getBooleanExtra(EXTRA_PHOTO_KEY, false)
+        Log.i(TAG, "handleOpenXiaozhiIntent wake=$wake autoConnect=$autoConnect voice=$startVoice photo=$photoKey")
+        when {
+            photoKey -> XiaozhiAppEvents.requestPhotoKeyPress()
+            startVoice -> XiaozhiAppEvents.requestVoiceConversation()
+            else -> XiaozhiAppEvents.requestOpenConversation(
                 autoConnect = autoConnect,
                 fromVoiceWake = wake,
             )
@@ -89,5 +90,6 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_AUTO_CONNECT = "extra_auto_connect"
         const val EXTRA_WAKE_FROM_VOICE = "extra_wake_from_voice"
         const val EXTRA_START_VOICE = "extra_start_voice"
+        const val EXTRA_PHOTO_KEY = "extra_photo_key"
     }
 }
