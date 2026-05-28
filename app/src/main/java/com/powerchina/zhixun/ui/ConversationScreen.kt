@@ -1,10 +1,8 @@
 package com.powerchina.zhixun.ui
 
 import android.app.Activity
-import android.widget.Toast
+import android.content.Intent
 import android.graphics.BitmapFactory
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalOverscrollConfiguration
@@ -37,8 +35,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.LocationOn
-import androidx.compose.material.icons.outlined.ScreenShare
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -82,8 +80,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.powerchina.zhixun.R
+import com.powerchina.zhixun.dashcam.DashcamActivity
 import com.powerchina.zhixun.data.Message
-import com.powerchina.zhixun.screenrecord.ScreenRecordController
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.viewmodel.ConversationState
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
@@ -201,7 +199,6 @@ private fun MainConversationContent(
     viewModel: ConversationViewModel,
 ) {
     val context = LocalContext.current
-    val activity = context as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val featureComingText = stringResource(R.string.dashcam_feature_coming)
@@ -209,38 +206,8 @@ private fun MainConversationContent(
         scope.launch { snackbarHostState.showSnackbar(featureComingText) }
     }
 
-    val isScreenRecording by ScreenRecordController.isRecording.collectAsState()
-    val screenRecordElapsed by ScreenRecordController.elapsedSeconds.collectAsState()
-    val lastSavedRecording by ScreenRecordController.lastSavedPath.collectAsState()
-
-    val projectionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            ScreenRecordController.onConsentGranted(result.resultCode, result.data!!)
-            ScreenRecordController.startWithCachedConsent(context)
-        }
-    }
-
-    val onScreenRecordClick: () -> Unit = {
-        if (isScreenRecording) {
-            ScreenRecordController.stop(context)
-        } else if (ScreenRecordController.hasCachedConsent()) {
-            ScreenRecordController.startWithCachedConsent(context)
-        } else {
-            activity?.let { projectionLauncher.launch(ScreenRecordController.createCaptureIntent(it)) }
-        }
-    }
-
-    LaunchedEffect(lastSavedRecording) {
-        val path = lastSavedRecording ?: return@LaunchedEffect
-        val name = File(path).name
-        Toast.makeText(
-            context,
-            context.getString(R.string.screen_record_saved, name),
-            Toast.LENGTH_SHORT,
-        ).show()
-        ScreenRecordController.consumeSavedPath()
+    val onOpenDashcam: () -> Unit = {
+        context.startActivity(Intent(context, DashcamActivity::class.java))
     }
 
     LaunchedEffect(errorMessage) {
@@ -269,9 +236,7 @@ private fun MainConversationContent(
                 isWakeHandoffActive = isWakeHandoffActive,
                 onShowSettings = onShowSettings,
                 onLocationClick = onFeatureComing,
-                onScreenRecordClick = onScreenRecordClick,
-                isScreenRecording = isScreenRecording,
-                screenRecordElapsed = screenRecordElapsed,
+                onOpenDashcam = onOpenDashcam,
                 onBack = onBack,
             )
         },
@@ -361,12 +326,9 @@ private fun TopBar(
     isWakeHandoffActive: Boolean,
     onShowSettings: () -> Unit,
     onLocationClick: () -> Unit,
-    onScreenRecordClick: () -> Unit,
-    isScreenRecording: Boolean,
-    screenRecordElapsed: Long,
+    onOpenDashcam: () -> Unit,
     onBack: (() -> Unit)?,
 ) {
-    val recordTint = if (isScreenRecording) Color(0xFFE53935) else AuraPrimary
     val statusText = statusLabel(
         state = conversationState,
         isConnected = isConnected,
@@ -417,21 +379,11 @@ private fun TopBar(
                     tint = AuraPrimary,
                 )
             }
-            if (isScreenRecording) {
-                Text(
-                    text = stringResource(
-                        R.string.screen_record_timer,
-                        ScreenRecordController.formatElapsed(screenRecordElapsed),
-                    ),
-                    color = recordTint,
-                    style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
-                )
-            }
-            IconButton(onClick = onScreenRecordClick) {
+            IconButton(onClick = onOpenDashcam) {
                 Icon(
-                    imageVector = Icons.Outlined.ScreenShare,
-                    contentDescription = stringResource(R.string.feature_screen_record),
-                    tint = recordTint,
+                    imageVector = Icons.Outlined.Videocam,
+                    contentDescription = stringResource(R.string.open_dashcam),
+                    tint = AuraPrimary,
                 )
             }
         }

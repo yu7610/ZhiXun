@@ -10,7 +10,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission
         android:name="android.permission.BLUETOOTH"
@@ -59,11 +58,6 @@
             android:name=".xiaozhi.wake.XiaozhiWakeForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
-
-        <service
-            android:name=".screenrecord.ScreenRecordService"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
 
         <receiver
             android:name=".physicalkey.RecordKeyBlockReceiver"
