@@ -12,6 +12,12 @@ val keystorePropertiesFile = rootProject.file("keystore.properties")
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localProperties.load(FileInputStream(localPropertiesFile))
+}
+val baiduMapAk = localProperties.getProperty("baiduMapAk", "")
 
 android {
     namespace = "com.powerchina.zhixun"
@@ -27,6 +33,8 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.0.1"
+
+        manifestPlaceholders["BAIDU_MAP_AK"] = baiduMapAk
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -61,10 +69,12 @@ android {
     buildTypes {
         debug {
             signingConfig = signingConfigs.getByName("release")
+            buildConfigField("String", "BAIDU_MAP_AK", "\"$baiduMapAk\"")
         }
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
+            buildConfigField("String", "BAIDU_MAP_AK", "\"$baiduMapAk\"")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -78,6 +88,12 @@ android {
     buildFeatures {
         compose = true
         prefab = true
+        buildConfig = true
+    }
+    packaging {
+        jniLibs {
+            pickFirsts += listOf("**/libc++_shared.so")
+        }
     }
 }
 
@@ -101,6 +117,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
+    implementation(libs.baidu.map.sdk)
+    implementation(libs.baidu.location.sdk)
     implementation("com.github.paramsen:noise:2.0.0")
 
     implementation(platform(libs.androidx.compose.bom))

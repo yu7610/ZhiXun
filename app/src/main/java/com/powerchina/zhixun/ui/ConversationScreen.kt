@@ -81,6 +81,7 @@ import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.powerchina.zhixun.R
 import com.powerchina.zhixun.dashcam.DashcamActivity
+import com.powerchina.zhixun.location.LocationActivity
 import com.powerchina.zhixun.data.Message
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.viewmodel.ConversationState
@@ -210,6 +211,10 @@ private fun MainConversationContent(
         context.startActivity(Intent(context, DashcamActivity::class.java))
     }
 
+    val onOpenLocation: () -> Unit = {
+        context.startActivity(Intent(context, LocationActivity::class.java))
+    }
+
     LaunchedEffect(errorMessage) {
         val message = errorMessage?.trim().orEmpty()
         if (message.isNotBlank()) {
@@ -235,7 +240,7 @@ private fun MainConversationContent(
                 isWakeGreetingPlaying = isWakeGreetingPlaying,
                 isWakeHandoffActive = isWakeHandoffActive,
                 onShowSettings = onShowSettings,
-                onLocationClick = onFeatureComing,
+                onLocationClick = onOpenLocation,
                 onOpenDashcam = onOpenDashcam,
                 onBack = onBack,
             )

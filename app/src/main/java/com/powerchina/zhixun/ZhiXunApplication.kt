@@ -8,6 +8,7 @@ import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 import com.powerchina.zhixun.dashcam.VideoKeyRegistrar
 import com.powerchina.zhixun.physicalkey.PhysicalKeyLifecycle
+import com.powerchina.zhixun.location.BaiduSdkInitializer
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import com.powerchina.zhixun.xiaozhi.XiaozhiLifecycle
 import com.powerchina.zhixun.xiaozhi.XiaozhiMcpHandler
@@ -17,6 +18,7 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        BaiduSdkInitializer.ensureInitialized(this)
         PhysicalKeyLifecycle.register(this)
         Log.i(
             VideoKeyReceiver.TAG,
