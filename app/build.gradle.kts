@@ -118,6 +118,7 @@ dependencies {
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
     implementation(libs.baidu.map.sdk)
+    implementation(libs.baidu.map.util)
     implementation(libs.baidu.location.sdk)
     implementation("com.github.paramsen:noise:2.0.0")
 

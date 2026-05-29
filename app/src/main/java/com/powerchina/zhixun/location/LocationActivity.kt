@@ -5,6 +5,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.powerchina.zhixun.ui.theme.YTheme
+import com.powerchina.zhixun.util.ScreenOnHelper
+import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /** 定位轨迹页（百度地图） */
 class LocationActivity : ComponentActivity() {
@@ -13,6 +15,8 @@ class LocationActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         BaiduSdkInitializer.ensureInitialized(application)
         enableEdgeToEdge()
+        ScreenOnHelper.keepScreenOn(this)
+        XiaozhiWakeForegroundService.ensureStarted(this)
         setContent {
             YTheme(darkTheme = true) {
                 LocationScreen(onBack = { finish() })

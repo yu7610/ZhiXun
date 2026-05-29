@@ -66,28 +66,7 @@ object LocationTrackRepository {
     fun computeStats(
         points: List<TrackPoint>,
         nowMs: Long = System.currentTimeMillis(),
-    ): DailyTrackStats {
-        if (points.isEmpty()) return DailyTrackStats(0.0, 0, 0)
-        var mileageM = 0.0
-        var stayMs = 0L
-        for (i in 1 until points.size) {
-            val prev = points[i - 1]
-            val curr = points[i]
-            mileageM += haversineM(prev.latitude, prev.longitude, curr.latitude, curr.longitude)
-            if (curr.speedMps < 0.3f) {
-                stayMs += (curr.timestampMs - prev.timestampMs).coerceAtLeast(0L)
-            }
-        }
-        val last = points.last()
-        if (last.speedMps < 0.3f) {
-            stayMs += (nowMs - last.timestampMs).coerceAtLeast(0L)
-        }
-        return DailyTrackStats(
-            mileageKm = mileageM / 1000.0,
-            stayMinutes = (stayMs / 60_000L).toInt(),
-            pointCount = points.size,
-        )
-    }
+    ): DailyTrackStats = TrackStatsCalculator.rebuildFromPoints(points, nowMs)
 
     private fun archiveYesterdayIfNeeded(
         context: Context,
