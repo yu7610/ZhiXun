@@ -138,6 +138,8 @@ fun ConversationScreen(
     val isSessionConnecting by viewModel.isSessionConnecting.collectAsState()
     val isWakeGreetingPlaying by viewModel.isWakeGreetingPlaying.collectAsState()
     val isWakeHandoffActive by viewModel.isWakeHandoffActive.collectAsState()
+    val isSessionEndStandby by viewModel.isSessionEndStandby.collectAsState()
+    val isStandbyReconnecting by viewModel.isStandbyReconnecting.collectAsState()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -173,6 +175,8 @@ fun ConversationScreen(
         isSessionConnecting = isSessionConnecting,
         isWakeGreetingPlaying = isWakeGreetingPlaying,
         isWakeHandoffActive = isWakeHandoffActive,
+        isSessionEndStandby = isSessionEndStandby,
+        isStandbyReconnecting = isStandbyReconnecting,
         onShowSettings = onNavigateToSettings,
         onBack = onBack,
         showActivationDialog = showActivationDialog,
@@ -192,6 +196,8 @@ private fun MainConversationContent(
     isSessionConnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
     isWakeHandoffActive: Boolean,
+    isSessionEndStandby: Boolean,
+    isStandbyReconnecting: Boolean,
     onShowSettings: () -> Unit,
     onBack: (() -> Unit)?,
     showActivationDialog: Boolean,
@@ -239,6 +245,8 @@ private fun MainConversationContent(
                 isSessionConnecting = isSessionConnecting,
                 isWakeGreetingPlaying = isWakeGreetingPlaying,
                 isWakeHandoffActive = isWakeHandoffActive,
+                isSessionEndStandby = isSessionEndStandby,
+                isStandbyReconnecting = isStandbyReconnecting,
                 onShowSettings = onShowSettings,
                 onLocationClick = onOpenLocation,
                 onOpenDashcam = onOpenDashcam,
@@ -329,6 +337,8 @@ private fun TopBar(
     isSessionConnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
     isWakeHandoffActive: Boolean,
+    isSessionEndStandby: Boolean,
+    isStandbyReconnecting: Boolean,
     onShowSettings: () -> Unit,
     onLocationClick: () -> Unit,
     onOpenDashcam: () -> Unit,
@@ -342,6 +352,8 @@ private fun TopBar(
         isSessionConnecting = isSessionConnecting,
         isWakeGreetingPlaying = isWakeGreetingPlaying,
         isWakeHandoffActive = isWakeHandoffActive,
+        isSessionEndStandby = isSessionEndStandby,
+        isStandbyReconnecting = isStandbyReconnecting,
     )
 
     Box(
@@ -414,7 +426,15 @@ private fun statusLabel(
     isSessionConnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
     isWakeHandoffActive: Boolean,
+    isSessionEndStandby: Boolean,
+    isStandbyReconnecting: Boolean,
 ): String {
+    // 「退下」收尾、或待机快速重连窗口：待机/连接中态直接显示「待机」，不露出「连接中」
+    if ((isSessionEndStandby || isStandbyReconnecting) &&
+        (state == ConversationState.IDLE || state == ConversationState.CONNECTING)
+    ) {
+        return stringResource(R.string.status_standby)
+    }
     if (isWakeGreetingPlaying &&
         (state == ConversationState.LISTENING ||
             state == ConversationState.IDLE ||

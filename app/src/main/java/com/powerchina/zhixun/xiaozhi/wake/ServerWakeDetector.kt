@@ -143,6 +143,8 @@ class ServerWakeDetector(
         if (XiaozhiWakeCoordinator.shouldDeferWakeStopListening()) {
             Log.d(TAG, "问候 TTS 交接中，pause 不发送 stopListening")
         } else if (!XiaozhiWakeForegroundService.isConversationMicClaimed()) {
+            // abort 丢弃唤醒期间已上行的音频，避免唤醒前说的话被服务端 STT 提交后误回复
+            webSocket.sendAbort("wake_pause")
             webSocket.sendStopListening()
         } else {
             Log.d(TAG, "对话占用麦克风，pause 不发送 stopListening")

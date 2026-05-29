@@ -43,7 +43,7 @@ class OpusStreamPlayer(
             sampleRate,
             channelConfig,
             AudioFormat.ENCODING_PCM_16BIT
-        ) * 2 // Increase buffer size
+        ) * 4 // 加大缓冲，降低网络/解码抖动导致的 underrun（欠载会造成卡顿或瞬时没声）
 
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
@@ -94,11 +94,16 @@ class OpusStreamPlayer(
                 hasAudioFocus = true
                 Log.d(TAG, "获得音频焦点")
             }
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+            AudioManager.AUDIOFOCUS_LOSS -> {
                 hasAudioFocus = false
-                Log.d(TAG, "失去音频焦点")
+                Log.i(TAG, "永久失去音频焦点")
                 stop()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                // 瞬时焦点丢失（如录音切换、系统提示音）不掐断回复播放，
+                // 否则会出现「设备在回复却没声音」。播放结束由对话状态机控制。
+                hasAudioFocus = false
+                Log.i(TAG, "瞬时失去音频焦点，继续播放")
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 Log.d(TAG, "音频焦点被降低")
@@ -159,7 +164,7 @@ class OpusStreamPlayer(
         isPlaying = true
         if (audioTrack.state == AudioTrack.STATE_INITIALIZED) {
             audioTrack.play()
-            Log.d(TAG, "AudioTrack开始播放，状态: ${audioTrack.playState}")
+            Log.i(TAG, "AudioTrack开始播放，状态: ${audioTrack.playState}")
         } else {
             Log.e(TAG, "AudioTrack未初始化，状态: ${audioTrack.state}")
             isPlaying = false
@@ -180,6 +185,9 @@ class OpusStreamPlayer(
                     }
                 }
                 Log.d(TAG, "PCM数据流收集完成")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 停止/重建播放时取消收集属正常拆除，不当错误
+                Log.d(TAG, "播放收集已取消")
             } catch (e: Exception) {
                 Log.e(TAG, "播放音频流时出错", e)
             } finally {

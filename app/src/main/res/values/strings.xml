@@ -5,8 +5,8 @@
     <string name="status_disconnected">未连接</string>
     <string name="status_standby">待机</string>
     <string name="status_listening">聆听中…</string>
-    <string name="status_processing">说话中…</string>
-    <string name="status_speaking">回复中…</string>
+    <string name="status_processing">思考中…</string>
+    <string name="status_speaking">说话中…</string>
     <string name="connecting">连接中...</string>
     <string name="connected">已连接</string>
     <string name="disconnected">未连接</string>

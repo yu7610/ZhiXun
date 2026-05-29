@@ -16,6 +16,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.channels.BufferOverflow
 
 /**
  * 音频事件
@@ -58,7 +59,11 @@ class EnhancedAudioManager(private val context: Context) {
     private var streamPlayer: OpusStreamPlayer? = null
     
     // 音频播放流
-    private val _audioPlaybackFlow = MutableSharedFlow<ByteArray>()
+    // 带缓冲，避免下行音频帧因瞬时无订阅者/慢收集而被丢弃
+    private val _audioPlaybackFlow = MutableSharedFlow<ByteArray>(
+        extraBufferCapacity = 128,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     private var playbackJob: Job? = null
     private var isPlaybackSetup = false
 
@@ -240,6 +245,8 @@ class EnhancedAudioManager(private val context: Context) {
                             Log.d(TAG, "解码音频数据，PCM大小: ${it.size}")
                         }
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "解码音频数据失败", e)
                 }
@@ -389,7 +396,15 @@ class EnhancedAudioManager(private val context: Context) {
                     Log.d(TAG, "首次播放音频，设置播放流")
                     setupAudioPlayback()
                 }
-                
+
+                // 播放收集器是异步订阅的：首帧若早于订阅，SharedFlow 会直接丢弃，
+                // 导致「设备在回复却没声音/丢开头」。这里短暂等待收集器就绪再发。
+                var waited = 0
+                while (_audioPlaybackFlow.subscriptionCount.value == 0 && waited < 500) {
+                    delay(10)
+                    waited += 10
+                }
+
                 // 直接发送到播放流
                 _audioPlaybackFlow.emit(audioData)
                 Log.d(TAG, "发送音频数据到播放流，长度: ${audioData.size}")
