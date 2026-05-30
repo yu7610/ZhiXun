@@ -45,7 +45,7 @@ class XiaozhiWakeForegroundService : Service() {
                 pausedByConversation = true
                 Log.d(TAG, "onStartCommand PAUSE")
                 wakeListener?.pause()
-                return START_STICKY
+                return START_NOT_STICKY
             }
             ACTION_RESUME -> {
                 pausedByConversation = false
@@ -53,7 +53,7 @@ class XiaozhiWakeForegroundService : Service() {
                 if (canStartListening()) {
                     startDetector()
                 }
-                return START_STICKY
+                return START_NOT_STICKY
             }
             ACTION_STOP -> {
                 Log.i(TAG, "onStartCommand STOP")
@@ -68,7 +68,16 @@ class XiaozhiWakeForegroundService : Service() {
         if (!pausedByConversation && canStartListening()) {
             startDetector()
         }
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // 从最近任务划掉时干净结束前台服务，让系统能彻底杀死应用（不残留、不复活）
+        Log.i(TAG, "onTaskRemoved → 停止唤醒服务")
+        stopDetector()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -106,6 +115,10 @@ class XiaozhiWakeForegroundService : Service() {
         val cfg = ConfigManager(applicationContext).loadConfig()
         val preferServer = cfg.websocketUrl.isNotBlank() || cfg.otaUrl.isNotBlank()
         wakeListener = when {
+            OfflineWakeDetector.isAvailable() -> {
+                Log.i(TAG, "引擎=离线KWS (sherpa-onnx，待机不联网)")
+                OfflineWakeDetector(applicationContext, callback)
+            }
             preferServer -> {
                 Log.i(TAG, "引擎=ServerSTT (小智已配置，与按键对话同路径)")
                 ServerWakeDetector(applicationContext, callback)

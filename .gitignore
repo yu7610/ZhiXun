@@ -16,3 +16,6 @@ local.properties
 keystore.properties
 *.jks
 app/release/*.apk
+
+# 测试用临时签名，勿提交
+*.keystore

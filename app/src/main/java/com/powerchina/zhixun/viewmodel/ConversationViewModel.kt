@@ -146,6 +146,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private var shouldResumeOnUiReturn = false
     private var resumeManualListening = false
 
+    /** 短指令(如「拍照」)发送后，隐藏紧接着回来的那条 STT 回显，不进聊天框（对齐 esp32 hide_next_stt_message_） */
+    private var hideNextSttEcho = false
+
     // 语音唤醒「你好，智询」后待进入对话
     private var pendingVoiceWake = false
 
@@ -867,9 +870,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         webSocketManager.sendStopListening()
         pendingAutoStart = false
         transitionState(ConversationState.PROCESSING, "photo_wake_detect")
-        XiaozhiAppEvents.requestPhotoCapture()
-        Log.i(TAG, "待机拍照键：本地拍照")
-        VoiceFlowLog.snapshot("photoKey.standby", "localCapture")
+        // 按文档：待机下拍照键 → 发「拍照」唤醒词给服务端，由服务端调 MCP take_photo
+        hideNextSttEcho = true
+        webSocketManager.sendWakeWordDetected("拍照")
+        Log.i(TAG, "待机拍照键：发送「拍照」detect 给服务端，等待 MCP take_photo")
+        VoiceFlowLog.snapshot("photoKey.standby", "send 拍照 detect")
     }
 
     private fun sendPhotoTextInConversation() {
@@ -885,9 +890,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         webSocketManager.sendStopListening()
         pendingAutoStart = false
         transitionState(ConversationState.PROCESSING, "photo_key_listening")
-        XiaozhiAppEvents.requestPhotoCapture()
-        Log.i(TAG, "聆听拍照键：本地拍照")
-        VoiceFlowLog.snapshot("photoKey.listening", "localCapture")
+        // 按文档：对话中拍照键 → 直接发「拍照」文字给服务端，由服务端调 MCP take_photo
+        hideNextSttEcho = true
+        webSocketManager.sendWakeWordDetected("拍照")
+        Log.i(TAG, "聆听拍照键：发送「拍照」文字给服务端，等待 MCP take_photo")
+        VoiceFlowLog.snapshot("photoKey.listening", "send 拍照 text")
     }
 
     private fun stopConversationFromVoiceKey() {
@@ -1982,6 +1989,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 "stt" -> {
                     if (!conversationUiActive) return@handleTextMessage
                     val text = json.get("text")?.asString
+                    if (hideNextSttEcho) {
+                        hideNextSttEcho = false
+                        Log.i(TAG, "隐藏短指令 STT 回显: $text")
+                        return@handleTextMessage
+                    }
                     if (shouldSuppressWakeSttEcho(text)) {
                         VoiceFlowLog.decision("msg.stt", "处理", false, "唤醒回显")
                         Log.d(TAG, "唤醒交接中，忽略 STT: $text")

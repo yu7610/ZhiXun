@@ -39,7 +39,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            // 目标设备为 arm64，仅打包 arm64-v8a 以大幅减小体积（离线 KWS 库也仅 arm64）
+            abiFilters += listOf("arm64-v8a")
         }
 
         externalNativeBuild {
@@ -94,6 +95,10 @@ android {
         jniLibs {
             pickFirsts += listOf("**/libc++_shared.so")
         }
+    }
+    androidResources {
+        // 离线 KWS 模型(onnx)不压缩，确保 sherpa-onnx 能从 assets 正确读取
+        noCompress += "onnx"
     }
 }
 

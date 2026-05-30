@@ -50,10 +50,15 @@ object XiaozhiMcpHandler {
             if (method.startsWith("notifications/")) return
 
             val id = payload.get("id")?.asInt ?: return
+            Log.i(TAG, "收到 MCP method=$method id=$id")
             when (method) {
                 "initialize" -> handleInitialize(webSocket, id, payload)
                 "tools/list" -> handleToolsList(webSocket, id)
-                "tools/call" -> handleToolsCall(webSocket, id, payload)
+                "tools/call" -> {
+                    val name = payload.getAsJsonObject("params")?.get("name")?.asString
+                    Log.i(TAG, "★ 服务端调用 tools/call name=$name")
+                    handleToolsCall(webSocket, id, payload)
+                }
                 else -> webSocket.sendMcpError(id, "Method not implemented: $method")
             }
         } catch (e: Exception) {

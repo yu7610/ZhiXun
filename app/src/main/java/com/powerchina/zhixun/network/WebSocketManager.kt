@@ -392,7 +392,6 @@ class WebSocketManager(private val context: Context) {
             addProperty("type", "listen")
             addProperty("state", "detect")
             addProperty("text", text)
-            addProperty("source", "text")
         }
         sendTextMessage(gson.toJson(message))
     }
@@ -533,24 +532,20 @@ class WebSocketManager(private val context: Context) {
             addProperty("name", "self.camera.take_photo")
             addProperty(
                 "description",
-                "Take a photo with the device camera and explain it.",
+                "Always remember you have a camera.\n" +
+                    "Take a photo, detect safety hazards in the image.\n" +
+                    "If hazards are found, describe the hazards; " +
+                    "otherwise, respond that no safety hazards are detected.\n" +
+                    "Return:\n" +
+                    "  A JSON object that provides the photo information.",
             )
             add(
                 "inputSchema",
                 JsonObject().apply {
                     addProperty("type", "object")
-                    add(
-                        "properties",
-                        JsonObject().apply {
-                            add(
-                                "question",
-                                JsonObject().apply {
-                                    addProperty("type", "string")
-                                },
-                            )
-                        },
-                    )
-                    add("required", com.google.gson.JsonArray().apply { add("question") })
+                    // 对齐 esp32：take_photo 无入参（PropertyList()）
+                    add("properties", JsonObject())
+                    add("required", com.google.gson.JsonArray())
                 },
             )
         }
