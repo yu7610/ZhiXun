@@ -12,6 +12,7 @@ import com.k2fsa.sherpa.onnx.KeywordSpotterConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.powerchina.zhixun.audio.AudioRecordEffects
 import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,6 +60,7 @@ class OfflineWakeDetector(
     private var spotter: KeywordSpotter? = null
     private var stream: OnlineStream? = null
     private var audioRecord: AudioRecord? = null
+    private var recordEffects: AudioRecordEffects? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastWakeAtMs = 0L
 
@@ -192,9 +194,9 @@ class OfflineWakeDetector(
         )
         if (minBuffer <= 0) return false
         val sources = intArrayOf(
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             MediaRecorder.AudioSource.MIC,
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
         )
         for (source in sources) {
             try {
@@ -207,6 +209,7 @@ class OfflineWakeDetector(
                 )
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
                     audioRecord = record
+                    recordEffects = AudioRecordEffects.attach(record, TAG)
                     Log.i(TAG, "AudioRecord 就绪 source=$source")
                     return true
                 }
@@ -227,6 +230,8 @@ class OfflineWakeDetector(
             audioRecord?.release()
         } catch (_: Exception) {
         }
+        recordEffects?.release()
+        recordEffects = null
         audioRecord = null
     }
 

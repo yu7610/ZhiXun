@@ -71,4 +71,5 @@
     <string name="wake_notification_channel_desc">后台监听「你好，智询」</string>
     <string name="wake_notification_title">智询语音唤醒</string>
     <string name="wake_notification_text">正在监听：你好，智询</string>
+    <string name="press_back_again_to_exit">再按一下退出程序</string>
 </resources>

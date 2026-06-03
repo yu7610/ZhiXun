@@ -12,6 +12,7 @@ import android.os.PowerManager
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.powerchina.zhixun.audio.utils.OpusEncoder
+import com.powerchina.zhixun.audio.AudioRecordEffects
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.network.WebSocketEvent
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
@@ -68,6 +69,7 @@ class ServerWakeDetector(
     private var eventJob: Job? = null
     private var removeTextListener: (() -> Unit)? = null
     private var audioRecord: AudioRecord? = null
+    private var recordEffects: AudioRecordEffects? = null
     private var opusEncoder: OpusEncoder? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var streamGeneration = 0
@@ -423,6 +425,7 @@ class ServerWakeDetector(
                 )
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
                     audioRecord = record
+                    recordEffects = AudioRecordEffects.attach(record, TAG)
                     Log.i(TAG, "AudioRecord 就绪 source=$source buffer=$minBuffer")
                     return true
                 }
@@ -443,6 +446,8 @@ class ServerWakeDetector(
             audioRecord?.release()
         } catch (_: Exception) {
         }
+        recordEffects?.release()
+        recordEffects = null
         audioRecord = null
         opusEncoder?.release()
         opusEncoder = null

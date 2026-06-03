@@ -4,8 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.*
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.content.ContextCompat
@@ -49,9 +47,7 @@ class EnhancedAudioManager(private val context: Context) {
     private val _audioEvents = MutableSharedFlow<AudioEvent>()
     val audioEvents: SharedFlow<AudioEvent> = _audioEvents
 
-    // AEC和NS处理器
-    private var acousticEchoCanceler: AcousticEchoCanceler? = null
-    private var noiseSuppressor: NoiseSuppressor? = null
+    private var recordEffects: AudioRecordEffects? = null
 
     // Opus编解码器
     private var opusEncoder: OpusEncoder? = null
@@ -188,37 +184,8 @@ class EnhancedAudioManager(private val context: Context) {
         }
         audioRecord = record
 
-        // 设置AEC和NS
-        setupAudioEffects()
-    }
-
-    /**
-     * 设置音频效果（AEC+NS）
-     */
-    private fun setupAudioEffects() {
-        audioRecord?.let { record ->
-            try {
-                // 回音消除
-                if (AcousticEchoCanceler.isAvailable()) {
-                    acousticEchoCanceler = AcousticEchoCanceler.create(record.audioSessionId)
-                    acousticEchoCanceler?.enabled = true
-                    Log.d(TAG, "AEC已启用")
-                } else {
-                    Log.w(TAG, "设备不支持AEC")
-                }
-
-                // 噪声抑制
-                if (NoiseSuppressor.isAvailable()) {
-                    noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)
-                    noiseSuppressor?.enabled = true
-                    Log.d(TAG, "NS已启用")
-                } else {
-                    Log.w(TAG, "设备不支持NS")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "设置音频效果失败", e)
-            }
-        }
+        recordEffects?.release()
+        recordEffects = AudioRecordEffects.attach(record, TAG)
     }
 
     /**
@@ -366,16 +333,8 @@ class EnhancedAudioManager(private val context: Context) {
      */
     fun releaseRecorderOnly() {
         stopRecording()
-        try {
-            acousticEchoCanceler?.release()
-        } catch (_: Exception) {
-        }
-        acousticEchoCanceler = null
-        try {
-            noiseSuppressor?.release()
-        } catch (_: Exception) {
-        }
-        noiseSuppressor = null
+        recordEffects?.release()
+        recordEffects = null
         try {
             audioRecord?.release()
         } catch (_: Exception) {
@@ -480,10 +439,8 @@ class EnhancedAudioManager(private val context: Context) {
         stopRecording()
         stopStreamPlayback()
 
-        acousticEchoCanceler?.release()
-        acousticEchoCanceler = null
-        noiseSuppressor?.release()
-        noiseSuppressor = null
+        recordEffects?.release()
+        recordEffects = null
 
         audioRecord?.release()
         audioRecord = null

@@ -1,14 +1,21 @@
 package com.powerchina.zhixun.ui
 
 import android.util.Log
-
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import com.powerchina.zhixun.R
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -20,6 +27,7 @@ import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 
 private const val TAG = "ZhiXunNavHost"
+private const val EXIT_CONFIRM_MS = 3_000L
 
 object AppRoutes {
     const val Conversation = "conversation"
@@ -100,6 +108,22 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                         Log.d(TAG, "已在对话页")
                     }
                 }
+            }
+        }
+
+        val exitHint = stringResource(R.string.press_back_again_to_exit)
+        var lastBackPressAt by remember { mutableLongStateOf(0L) }
+        BackHandler {
+            if (navController.previousBackStackEntry != null) {
+                navController.popBackStack()
+                return@BackHandler
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastBackPressAt < EXIT_CONFIRM_MS) {
+                (context as? ComponentActivity)?.finish()
+            } else {
+                lastBackPressAt = now
+                Toast.makeText(context, exitHint, Toast.LENGTH_SHORT).show()
             }
         }
 

@@ -16,6 +16,7 @@ import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import com.powerchina.zhixun.audio.AudioRecordEffects
 import kotlin.math.sqrt
 
 /**
@@ -46,6 +47,7 @@ class WakePhraseDetector(
 
     private var speechRecognizer: SpeechRecognizer? = null
     private var audioRecord: AudioRecord? = null
+    private var recordEffects: AudioRecordEffects? = null
     private var vadThread: Thread? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var recognizeTimeoutRunnable: Runnable? = null
@@ -335,15 +337,16 @@ class WakePhraseDetector(
             return false
         }
         val sources = intArrayOf(
-            MediaRecorder.AudioSource.MIC,
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.MIC,
         )
         for (source in sources) {
             try {
                 val record = AudioRecord(source, SAMPLE_RATE, CHANNEL, ENCODING, minBuffer * 2)
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
                     audioRecord = record
+                    recordEffects = AudioRecordEffects.attach(record, TAG)
                     Log.i(TAG, "AudioRecord 就绪 source=$source buffer=$minBuffer")
                     return true
                 }
@@ -364,6 +367,8 @@ class WakePhraseDetector(
             audioRecord?.release()
         } catch (_: Exception) {
         }
+        recordEffects?.release()
+        recordEffects = null
         audioRecord = null
     }
 
