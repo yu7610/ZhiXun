@@ -1,0 +1,64 @@
+package com.powerchina.zhixun.audio
+
+import android.media.AudioRecord
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import android.util.Log
+
+/**
+ * 为 AudioRecord 启用系统 AEC/NS（设备支持时）。
+ */
+class AudioRecordEffects private constructor(
+    private val acousticEchoCanceler: AcousticEchoCanceler?,
+    private val noiseSuppressor: NoiseSuppressor?,
+) {
+    val aecEnabled: Boolean get() = acousticEchoCanceler?.enabled == true
+    val nsEnabled: Boolean get() = noiseSuppressor?.enabled == true
+
+    fun release() {
+        try {
+            acousticEchoCanceler?.release()
+        } catch (_: Exception) {
+        }
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Exception) {
+        }
+    }
+
+    companion object {
+        fun attach(record: AudioRecord, logTag: String): AudioRecordEffects {
+            var aec: AcousticEchoCanceler? = null
+            var ns: NoiseSuppressor? = null
+            try {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    aec = AcousticEchoCanceler.create(record.audioSessionId)
+                    aec?.enabled = true
+                    Log.d(logTag, "AEC已启用 session=${record.audioSessionId}")
+                } else {
+                    Log.w(logTag, "设备不支持AEC")
+                }
+                if (NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(record.audioSessionId)
+                    ns?.enabled = true
+                    Log.d(logTag, "NS已启用 session=${record.audioSessionId}")
+                } else {
+                    Log.w(logTag, "设备不支持NS")
+                }
+            } catch (e: Exception) {
+                Log.e(logTag, "设置音频效果失败", e)
+                try {
+                    aec?.release()
+                } catch (_: Exception) {
+                }
+                try {
+                    ns?.release()
+                } catch (_: Exception) {
+                }
+                aec = null
+                ns = null
+            }
+            return AudioRecordEffects(aec, ns)
+        }
+    }
+}
