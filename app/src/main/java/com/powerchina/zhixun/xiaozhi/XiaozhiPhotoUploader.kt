@@ -3,6 +3,7 @@ package com.powerchina.zhixun.xiaozhi
 import android.app.Application
 import android.util.Log
 import com.powerchina.zhixun.data.ConfigManager
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import com.powerchina.zhixun.network.WebSocketManager
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -14,7 +15,7 @@ import kotlinx.coroutines.withContext
  */
 object XiaozhiPhotoUploader {
 
-    private const val TAG = "XiaozhiPhoto"
+    private const val TAG = PhotoKeyLog.TAG
     private const val CONNECT_WAIT_MS = 15_000L
 
     suspend fun uploadPhotoForMcp(

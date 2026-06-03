@@ -1,6 +1,10 @@
 package com.powerchina.zhixun.dashcam
 
 import android.content.Context
+import android.util.Log
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
+import com.powerchina.zhixun.xiaozhi.PhotoResult
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import java.io.File
 
 /**
@@ -11,13 +15,55 @@ object SharedCameraCapture {
     @Volatile
     var dashcamSession: DashcamCameraSession? = null
 
+    private val captureGate = Any()
+
+    @Volatile
+    private var captureInProgress = false
+
+    fun releasePreWarm() {
+        QuickPhotoCapture.releasePreWarm()
+    }
+
+    fun forceReset() {
+        synchronized(captureGate) {
+            captureInProgress = false
+        }
+        QuickPhotoCapture.forceReset()
+        Log.w(TAG, "SharedCameraCapture 强制重置")
+    }
+
     fun capture(context: Context, onResult: (Result<File>) -> Unit) {
+        synchronized(captureGate) {
+            if (captureInProgress) {
+                Log.w(TAG, "已有 MCP 拍照进行中")
+                onResult(Result.failure(IllegalStateException("拍照进行中，请稍候")))
+                return
+            }
+            captureInProgress = true
+        }
+        val finish: (Result<File>) -> Unit = { result ->
+            captureInProgress = false
+            onResult(result)
+        }
         val session = dashcamSession
         if (session != null) {
             val file = DashcamRecordingStore.createPhotoFile(context.applicationContext)
-            session.takePicture(file, onResult)
+            session.takePicture(file, finish)
             return
         }
-        QuickPhotoCapture.capture(context, onResult)
+        QuickPhotoCapture.capture(context) { result ->
+            result.onSuccess { file ->
+                XiaozhiAppEvents.emitPhotoResult(
+                    PhotoResult(
+                        file = file,
+                        uploadResult = Result.success(Unit),
+                        captureOnly = true,
+                    ),
+                )
+            }
+            finish(result)
+        }
     }
+
+    private const val TAG = PhotoKeyLog.TAG
 }

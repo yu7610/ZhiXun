@@ -26,6 +26,13 @@
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
+    <!-- Android 11+ 包可见性：允许发现系统 TTS 引擎 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:name=".ZhiXunApplication"
         android:enableOnBackInvokedCallback="true"
@@ -101,6 +108,8 @@
             android:name=".physicalkey.PhotoKeyBlockReceiver"
             android:exported="true">
             <intent-filter android:priority="2147483647">
+                <action android:name="android.intent.action.PRESS_PIC_KEY_DOWN" />
+                <action android:name="android.intent.action.PRESS_PIC_KEY" />
                 <action android:name="android.intent.action.PRESS_VIDEO_KEY" />
                 <action android:name="android.intent.action.CAMERA_BUTTON" />
                 <action android:name="android.intent.action.PRESS_CAMERA_KEY" />
@@ -112,32 +121,10 @@
                 <action android:name="com.android.camera.action.CAMERA_BUTTON" />
                 <action android:name="com.yulong.action.PRESS_PHOTO_KEY" />
                 <action android:name="com.yulong.action.PHOTO_KEY" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </receiver>
-
-        <receiver
-            android:name=".dashcam.VideoKeyProbeReceiver"
-            android:exported="true">
-            <intent-filter android:priority="2147483646">
-                <action android:name="android.intent.action.PRESS_VIDEO_KEY" />
-                <action android:name="android.intent.action.CAMERA_BUTTON" />
-                <action android:name="android.intent.action.PRESS_CAMERA_KEY" />
-                <action android:name="android.intent.action.CAMERA_SNAPSHOT" />
-                <action android:name="intent.action.PRESS_VIDEO_KEY" />
-                <action android:name="intent.action.PRESS_CAMERA_KEY" />
-                <action android:name="com.android.intent.action.PRESS_VIDEO_KEY" />
-                <action android:name="com.android.intent.action.PRESS_CAMERA_KEY" />
-                <action android:name="com.android.camera.action.CAMERA_BUTTON" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-            <intent-filter android:priority="2147483646">
-                <action android:name="android.intent.action.LONG_PRESS_VIDEO_KEY" />
-                <action android:name="android.intent.action.LONG_PRESS_CAMERA_KEY" />
-                <action android:name="intent.action.LONG_PRESS_VIDEO_KEY" />
-                <action android:name="intent.action.LONG_PRESS_CAMERA_KEY" />
-                <action android:name="com.android.intent.action.LONG_PRESS_VIDEO_KEY" />
-                <action android:name="com.android.intent.action.LONG_PRESS_CAMERA_KEY" />
+                <action android:name="com.yulong.android.action.PRESS_PHOTO_KEY" />
+                <action android:name="com.yulong.android.action.PHOTO_KEY" />
+                <action android:name="com.yulong.action.CAMERA_KEY" />
+                <action android:name="com.yulong.android.action.CAMERA_KEY" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </receiver>

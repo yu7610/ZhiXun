@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.powerchina.zhixun.MainActivity
+import com.powerchina.zhixun.dashcam.PhysicalKeyCodes
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import com.powerchina.zhixun.physicalkey.PhysicalKeyInterceptor
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 
@@ -60,7 +62,7 @@ object VideoKeyHandler {
         )
         return when (keyAction) {
             DashcamVideoKeyEvents.KeyAction.PHOTO -> {
-                Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.PHOTO} 拍照键 -> 发送拍照指令")
+                Log.d(PhotoKeyLog.TAG, "keyCode=${PhysicalKeyCodes.PHOTO} 拍照键 -> 发送拍照指令")
                 dispatchPhotoKey(context)
                 true
             }
@@ -81,6 +83,8 @@ object VideoKeyHandler {
             VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY,
             VideoKeyReceiver.ACTION_CAMERA_BUTTON,
             VideoKeyReceiver.ACTION_PRESS_CAMERA_KEY,
+            VideoKeyReceiver.ACTION_PRESS_PIC_KEY_DOWN,
+            VideoKeyReceiver.ACTION_PRESS_PIC_KEY,
             "intent.action.PRESS_VIDEO_KEY",
             "com.android.intent.action.PRESS_VIDEO_KEY",
             "intent.action.PRESS_CAMERA_KEY",
@@ -107,9 +111,11 @@ object VideoKeyHandler {
 
     private fun dispatchPhotoKey(context: Context) {
         if (PhysicalKeyInterceptor.isAppInForeground) {
+            Log.i(PhotoKeyLog.TAG, "拍照键 -> 前台，发送「拍照」指令 (requestPhotoKeyPress)")
             XiaozhiAppEvents.requestPhotoKeyPress()
             return
         }
+        Log.i(PhotoKeyLog.TAG, "拍照键 -> 后台，拉起 MainActivity 并补发拍照")
         val launchIntent = Intent(context, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra(MainActivity.EXTRA_OPEN_XIAOZHI, true)
@@ -124,6 +130,7 @@ object VideoKeyHandler {
         Log.i(
             VideoKeyReceiver.TAG,
             "物理键映射: keyCode=${PhysicalKeyCodes.PHOTO}(拍照) keyCode=${PhysicalKeyCodes.RECORD}(录像)\n" +
+                "拍照日志 TAG=${PhotoKeyLog.TAG}\n" +
                 "广播测试:\n" +
                 "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY} -p $pkg\n" +
                 "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_CAMERA_BUTTON} -p $pkg\n" +

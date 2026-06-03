@@ -30,5 +30,8 @@ class VideoKeyReceiver : BroadcastReceiver() {
         const val ACTION_CAMERA_BUTTON = "android.intent.action.CAMERA_BUTTON"
         const val ACTION_PRESS_CAMERA_KEY = "android.intent.action.PRESS_CAMERA_KEY"
         const val ACTION_LONG_PRESS_CAMERA_KEY = "android.intent.action.LONG_PRESS_CAMERA_KEY"
+        /** PhoneWindowManager.keyBroadcastCamera 实测（scanCode=88 / F12） */
+        const val ACTION_PRESS_PIC_KEY_DOWN = "android.intent.action.PRESS_PIC_KEY_DOWN"
+        const val ACTION_PRESS_PIC_KEY = "android.intent.action.PRESS_PIC_KEY"
     }
 }

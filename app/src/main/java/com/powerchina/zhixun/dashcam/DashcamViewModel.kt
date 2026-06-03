@@ -4,6 +4,12 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.powerchina.zhixun.data.ConfigManager
+import com.powerchina.zhixun.xiaozhi.XiaozhiPhotoUploader
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,9 +17,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 
 class DashcamViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application.applicationContext
+
+    private companion object {
+        private const val FRAME_UPLOAD_INTERVAL_MS = 5_000L
+    }
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
@@ -31,6 +43,8 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private val recordingController: DashcamRecordingController?
         get() = cameraSession?.recordingController
     private var timerJob: Job? = null
+    private var frameUploadJob: Job? = null
+    private val frameCaptureInProgress = AtomicBoolean(false)
     private var hasAutoStarted = false
     private var userStoppedRecording = false
 
@@ -42,6 +56,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         cameraSession = session
         SharedCameraCapture.dashcamSession = session
         if (session != null) {
+            McpCameraHolder.pauseForDashcam()
             tryAutoStartRecording()
         }
     }
@@ -121,10 +136,12 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 _isRecording.value = true
                 _elapsedSeconds.value = 0
                 startTimer()
+                startFrameUploadLoop()
             },
             onError = { err ->
                 _isRecording.value = false
                 stopTimer()
+                stopFrameUploadLoop()
                 _message.value = err
             },
         )
@@ -135,6 +152,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         controller.stopRecording { result ->
             _isRecording.value = false
             stopTimer()
+            stopFrameUploadLoop()
             result.onSuccess { file ->
                 refreshClips()
                 _message.value = "已保存：${file.name}"
@@ -160,8 +178,80 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         timerJob = null
     }
 
+    private fun startFrameUploadLoop() {
+        stopFrameUploadLoop()
+        RecordingFrameTts.resetDedupe()
+        RecordingFrameTts.warmUp(getApplication())
+        frameUploadJob = viewModelScope.launch {
+            Log.i(RecordingFrameUploader.TAG, "录屏帧上传已启动，间隔 ${FRAME_UPLOAD_INTERVAL_MS}ms")
+            while (isActive && _isRecording.value) {
+                delay(FRAME_UPLOAD_INTERVAL_MS)
+                if (!_isRecording.value) break
+                captureAndUploadFrame()
+            }
+        }
+    }
+
+    private fun stopFrameUploadLoop() {
+        frameUploadJob?.cancel()
+        frameUploadJob = null
+    }
+
+    private suspend fun captureAndUploadFrame() {
+        val session = cameraSession
+        if (session == null) {
+            Log.w(RecordingFrameUploader.TAG, "相机未就绪，跳过本帧")
+            return
+        }
+        if (!frameCaptureInProgress.compareAndSet(false, true)) {
+            Log.d(RecordingFrameUploader.TAG, "上一帧尚未完成，跳过")
+            return
+        }
+        val frameFile = File(app.cacheDir, "rec_frame_${System.currentTimeMillis()}.jpg")
+        try {
+            val captured = suspendCaptureFrame(session, frameFile)
+            if (captured == null) {
+                Log.w(RecordingFrameUploader.TAG, "抓帧失败")
+                frameFile.delete()
+                return
+            }
+            withContext(Dispatchers.IO) {
+                val jpegBytes = XiaozhiPhotoUploader.compressJpegForUpload(captured)
+                val deviceId = ConfigManager(getApplication()).loadConfig().macAddress
+                val upload = RecordingFrameUploader.uploadFrame(
+                    context = app,
+                    deviceId = deviceId,
+                    jpegBytes = jpegBytes,
+                    filename = captured.name,
+                )
+                val speakText = upload.getOrNull()?.let { RecordingFrameUploader.parseSpeakText(it) }
+                if (speakText != null) {
+                    withContext(Dispatchers.Main) {
+                        RecordingFrameTts.speak(getApplication(), speakText)
+                    }
+                }
+            }
+        } finally {
+            frameFile.delete()
+            frameCaptureInProgress.set(false)
+        }
+    }
+
+    private suspend fun suspendCaptureFrame(
+        session: DashcamCameraSession,
+        outputFile: File,
+    ): File? = suspendCancellableCoroutine { cont ->
+        session.takePicture(outputFile) { result ->
+            if (cont.isActive) {
+                cont.resume(result.getOrNull())
+            }
+        }
+    }
+
     override fun onCleared() {
         SharedCameraCapture.dashcamSession = null
+        stopFrameUploadLoop()
+        RecordingFrameTts.shutdown()
         if (_isRecording.value) {
             recordingController?.stopRecording { _ -> refreshClips() }
         }

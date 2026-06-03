@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.powerchina.zhixun.dashcam.QuickPhotoCapture
 import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 
@@ -18,13 +19,17 @@ class PhotoKeyBlockReceiver : BroadcastReceiver() {
         if (!PhotoKeyBroadcast.isPhotoKeyAction(action)) return
 
         Log.i(
-            VideoKeyReceiver.TAG,
+            PhotoKeyLog.TAG,
             "拦截拍照广播 action=$action extras=${intent.extras}",
         )
         resultCode = Activity.RESULT_CANCELED
         if (isOrderedBroadcast) {
             abortBroadcast()
         }
-        VideoKeyHandler.requestServerPhoto(context.applicationContext)
+        QuickPhotoCapture.preWarm(context.applicationContext)
+        // PRESS_PIC_KEY（抬起）仅阻断系统相机；拍照在 DOWN 广播或 KeyEvent 已触发
+        if (action != VideoKeyReceiver.ACTION_PRESS_PIC_KEY) {
+            VideoKeyHandler.requestServerPhoto(context.applicationContext)
+        }
     }
 }

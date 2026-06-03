@@ -4,7 +4,7 @@ import android.content.Context
 import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
-import com.powerchina.zhixun.dashcam.VideoKeyReceiver
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 
 /**
  * 动态注册拍照键广播（部分 OEM 仅发给动态 Receiver）。
@@ -34,7 +34,7 @@ object PhotoKeyRegistrar {
         }
         registered = true
         Log.i(
-            VideoKeyReceiver.TAG,
+            PhotoKeyLog.TAG,
             "动态注册拍照键广播拦截 (${PhotoKeyBroadcast.MANIFEST_ACTIONS.size} actions)",
         )
     }

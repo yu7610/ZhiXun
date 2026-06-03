@@ -1,30 +1,46 @@
 package com.powerchina.zhixun.xiaozhi
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
 import android.util.Log
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import androidx.core.content.ContextCompat
 import com.powerchina.zhixun.dashcam.SharedCameraCapture
 import com.powerchina.zhixun.network.WebSocketManager
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * 作为 MCP 服务端响应小智云端（initialize / tools/list / tools/call）。
  */
 object XiaozhiMcpHandler {
 
-    private const val TAG = "XiaozhiMcp"
+    private const val TAG = PhotoKeyLog.TAG
     private const val TOOL_TAKE_PHOTO = "self.camera.take_photo"
+    private const val PHOTO_CAPTURE_TIMEOUT_MS = 15_000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val photoCaptureInFlight = AtomicBoolean(false)
+
+    /** 拍照会话超时或 takePicture 挂死时由 UI 层调用 */
+    fun abortStuckCapture(reason: String) {
+        photoCaptureInFlight.set(false)
+        SharedCameraCapture.forceReset()
+        Log.w(TAG, "中止卡住的拍照 reason=$reason")
+    }
 
     @Volatile
     private var application: Application? = null
@@ -112,17 +128,31 @@ object XiaozhiMcpHandler {
         }
 
         scope.launch {
-            XiaozhiAppEvents.beginPhotoSession()
-            XiaozhiWakeForegroundService.pauseListening(app)
+            if (!photoCaptureInFlight.compareAndSet(false, true)) {
+                Log.w(TAG, "忽略并发 MCP take_photo id=$id")
+                webSocket.sendMcpError(id, "拍照进行中，请稍候")
+                return@launch
+            }
+            var sessionEngaged = false
+            var recoverUi = false
+            var recoverMessage: String? = null
+            var sessionGeneration = 0L
             try {
-                val photoFile = capturePhoto(app) ?: throw IllegalStateException("拍照失败")
-                XiaozhiAppEvents.emitPhotoResult(
-                    PhotoResult(
-                        file = photoFile,
-                        uploadResult = Result.success(Unit),
-                        captureOnly = true,
-                    ),
-                )
+                if (!XiaozhiAppEvents.isPhotoSessionActive()) {
+                    Log.w(
+                        TAG,
+                        "忽略无会话 MCP take_photo id=$id（未按拍照键或上一轮已结束）",
+                    )
+                    webSocket.sendMcpError(id, "无进行中的拍照请求")
+                    return@launch
+                }
+                sessionEngaged = true
+                sessionGeneration = XiaozhiAppEvents.currentPhotoSessionGeneration()
+                XiaozhiWakeForegroundService.pauseListening(app)
+                ensureCameraPermission(app)
+                val photoFile = withTimeout(PHOTO_CAPTURE_TIMEOUT_MS) {
+                    capturePhoto(app) ?: throw IllegalStateException("拍照失败，请检查相机权限")
+                }
                 val upload = XiaozhiPhotoUploader.uploadPhotoForMcp(
                     application = app,
                     photoFile = photoFile,
@@ -133,18 +163,36 @@ object XiaozhiMcpHandler {
                     id,
                     XiaozhiVisionClient.buildToolCallResult(visionResult.response),
                 )
-                Log.i(TAG, "MCP tools/call 拍照完成 question=$question")
+                Log.i(TAG, "MCP tools/call 拍照完成 question=$question id=$id gen=$sessionGeneration")
+            } catch (e: TimeoutCancellationException) {
+                Log.e(TAG, "MCP 拍照超时 id=$id", e)
+                SharedCameraCapture.forceReset()
+                webSocket.sendMcpError(id, "拍照超时，请重试")
+                recoverUi = true
+                recoverMessage = "拍照超时，请重试"
             } catch (e: Exception) {
-                Log.e(TAG, "MCP tools/call 失败", e)
+                Log.e(TAG, "MCP tools/call 失败 id=$id", e)
                 webSocket.sendMcpError(id, e.message ?: "拍照失败")
-                XiaozhiAppEvents.emitPhotoResult(
-                    PhotoResult(
-                        file = null,
-                        uploadResult = Result.failure(e),
-                    ),
-                )
-                XiaozhiAppEvents.endPhotoSession()
+                recoverUi = true
+                recoverMessage = e.message ?: "拍照失败"
+            } finally {
+                photoCaptureInFlight.set(false)
+                if (sessionEngaged) {
+                    XiaozhiAppEvents.endPhotoSession(
+                        recoverUi = recoverUi,
+                        recoverMessage = recoverMessage,
+                        sessionGeneration = sessionGeneration,
+                    )
+                }
             }
+        }
+    }
+
+    private fun ensureCameraPermission(app: Application) {
+        if (ContextCompat.checkSelfPermission(app, Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            throw SecurityException("需要相机权限，请在对话页允许相机访问")
         }
     }
 
@@ -155,6 +203,9 @@ object XiaozhiMcpHandler {
                     if (cont.isActive) {
                         cont.resume(result.getOrNull())
                     }
+                }
+                cont.invokeOnCancellation {
+                    SharedCameraCapture.forceReset()
                 }
             }
         }

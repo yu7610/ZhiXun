@@ -22,6 +22,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.ui.theme.YTheme
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
@@ -56,10 +57,10 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
 
         LaunchedEffect(Unit) {
             XiaozhiAppEvents.photoKeyRequests.collect {
-                Log.i(TAG, "收到物理拍照键请求")
+                Log.i(PhotoKeyLog.TAG, "收到物理拍照键请求")
                 val cfg = configManager.loadConfig()
                 if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
-                    Log.w(TAG, "未配置，无法发送拍照指令")
+                    Log.w(PhotoKeyLog.TAG, "未配置，无法发送拍照指令")
                     return@collect
                 }
                 conversationViewModel.updateConfig(cfg)

@@ -48,11 +48,17 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.LaunchedEffect
@@ -543,12 +549,21 @@ private fun ChatBubble(message: Message) {
     } else {
         RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp)
     }
-    val imageBitmap = remember(message.imagePath) {
-        message.imagePath?.let { path ->
-            if (File(path).exists()) {
-                BitmapFactory.decodeFile(path)?.asImageBitmap()
-            } else {
-                null
+    var imageBitmap by remember(message.id, message.imagePath) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+    LaunchedEffect(message.imagePath) {
+        val path = message.imagePath
+        imageBitmap = if (path.isNullOrBlank()) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                val file = File(path)
+                if (file.exists()) {
+                    BitmapFactory.decodeFile(path)?.asImageBitmap()
+                } else {
+                    null
+                }
             }
         }
     }

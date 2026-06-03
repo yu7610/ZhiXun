@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.powerchina.zhixun.network.OkHttpClientFactory
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -22,7 +23,7 @@ data class VisionExplainResult(
  */
 object XiaozhiVisionClient {
 
-    private const val TAG = "XiaozhiVision"
+    private const val TAG = PhotoKeyLog.TAG
     const val DETECT_IMAGE_URL = "http://8.134.202.195:6086/recoder/detectImageFile"
     private const val NO_HAZARD_TEXT = "无安全隐患"
 
