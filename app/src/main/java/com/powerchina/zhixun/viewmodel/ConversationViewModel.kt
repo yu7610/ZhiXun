@@ -71,6 +71,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             RegexOption.IGNORE_CASE,
         )
         private val ASSISTANT_LEADING_JUNK = Regex("""^[.\s%]+""")
+        /** 小智 LLM 返回的心情 Emoji，不应显示在文字气泡里 */
+        private val ASSISTANT_EMOJI = Regex("""[\p{Extended_Pictographic}\uFE0F\u200D]""")
     }
 
     private val gson = Gson()
@@ -154,8 +156,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     // 物理录音键（138）待连接后开麦
     private var pendingRecordKeyStart = false
-    /** 待机拍照键：连接成功后补拍 */
+    /** 待机拍照键：连接/页面就绪后补发 detect */
     private var pendingPhotoFromStandby = false
+    private var pendingPhotoRetryJob: Job? = null
     private var pendingRecordKeyRetryJob: Job? = null
     private var pendingRecordKeyRetryCount = 0
 
@@ -197,12 +200,12 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             sessionManager.isConnected.collect { connected ->
                 _isConnected.value = connected
                 if (connected) {
-                    tryHandlePendingVoiceWake()
-                    tryHandlePendingRecordKeyStart()
-                    tryHandlePendingPhotoKey()
                     if (_state.value == ConversationState.CONNECTING) {
                         _state.value = ConversationState.IDLE
                     }
+                    tryHandlePendingVoiceWake()
+                    tryHandlePendingRecordKeyStart()
+                    tryHandlePendingPhotoKey()
                     if (pendingAutoStart && isAutoMode) {
                         tryStartAutoConversationIfNeeded()
                     }
@@ -248,73 +251,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             result.file?.let { showPhotoImage(it.absolutePath) }
             return
         }
-        result.file?.let { file ->
-            if (!isPhotoAlreadyShown(file.absolutePath)) {
-                showPhotoImage(file.absolutePath)
-            }
-        }
-        result.uploadResult
-            .onSuccess {
-                Log.i(TAG, "照片识别完成 ${result.file?.name}")
-                _errorMessage.value = null
-                showPhotoVisionDescription(result.visionDescription)
-                XiaozhiAppEvents.endPhotoSession()
-                resumeListeningAfterPhoto()
-            }
-            .onFailure { err ->
-                XiaozhiAppEvents.endPhotoSession()
-                _errorMessage.value = sanitizePhotoError(err.message)
-                enterStandby("photo_failed", notifyServer = false)
-            }
-    }
-
-    /** 拍照识别完成后进入自动聆听 */
-    private fun resumeListeningAfterPhoto() {
-        if (!conversationUiActive || !_isConnected.value) {
-            Log.w(TAG, "拍照后无法开麦 ui=$conversationUiActive connected=${_isConnected.value}")
-            enterStandby("photo_done_no_ui", notifyServer = false)
-            return
-        }
-        viewModelScope.launch {
-            performPhotoDoneListeningHandoff()
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private suspend fun performPhotoDoneListeningHandoff() {
-        XiaozhiWakeForegroundService.claimMicrophoneForConversation(getApplication())
-        pauseWakeListening()
-        isAutoMode = true
-        hasLoggedFirstAudioFrame = false
-
-        webSocketManager.sendStopListening()
-        delay(150)
-
-        if (!conversationUiActive || !_isConnected.value) {
+        result.uploadResult.onFailure { err ->
+            XiaozhiAppEvents.endPhotoSession()
+            _errorMessage.value = sanitizePhotoError(err.message)
             isAutoMode = false
-            XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
-            enterStandby("photo_listen_aborted", notifyServer = false)
-            return
+            enterStandby("photo_failed", notifyServer = false)
         }
-        if (!ensureRecordingReady()) {
-            isAutoMode = false
-            XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
-            enterStandby("photo_listen_not_ready", notifyServer = false)
-            return
-        }
-        if (!audioManager.startRecording()) {
-            isAutoMode = false
-            XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
-            enterStandby("photo_record_failed", notifyServer = false)
-            return
-        }
-
-        webSocketManager.sendStartListening("auto")
-        transitionState(ConversationState.LISTENING, "photo_done_listen")
-        updateStandbyReady()
-        scheduleListeningHealthCheck()
-        Log.i(TAG, "拍照完成 → 进入聆听")
-        VoiceFlowLog.snapshot("photoKey.done", "listening")
+        // MCP 上传成功：识别文字与语音由服务器 TTS/LLM 下发，TTS 结束后再进入聆听
     }
 
     private fun showPhotoImage(imagePath: String) {
@@ -330,30 +273,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             ),
         )
         Log.i(TAG, "展示照片 ${java.io.File(imagePath).name}")
-    }
-
-    private fun isPhotoAlreadyShown(imagePath: String): Boolean {
-        val last = _messages.value.lastOrNull() ?: return false
-        return last.role == MessageRole.USER && last.imagePath == imagePath
-    }
-
-    private fun showPhotoVisionDescription(description: String?) {
-        val text = description?.trim().orEmpty()
-        if (text.isBlank()) {
-            Log.w(TAG, "视觉描述为空，无法展示")
-            return
-        }
-        val last = _messages.value.lastOrNull()
-        if (last?.role == MessageRole.ASSISTANT && last.content.trim() == text) {
-            return
-        }
-        addMessage(
-            Message(
-                role = MessageRole.ASSISTANT,
-                content = text,
-            ),
-        )
-        Log.i(TAG, "展示视觉描述 len=${text.length}")
     }
 
     private fun sanitizePhotoError(message: String?): String {
@@ -372,6 +291,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     /** 过滤 LLM/TTS 流里泄漏的工具调用标记（如 % get_weather..） */
     private fun sanitizeAssistantText(text: String): String {
         var result = text
+        result = ASSISTANT_EMOJI.replace(result, "")
         result = ASSISTANT_TOOL_MARKER.replace(result, "")
         result = ASSISTANT_TOOL_JSON.replace(result, "")
         if ('%' in result) {
@@ -500,6 +420,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     /** 已在开麦聆听时收到的迟来 TTS 文本/控制信令（不含音频）应忽略，避免干扰当前轮次 */
     private fun shouldIgnoreStaleReplyWhileListening(): Boolean {
+        if (XiaozhiAppEvents.isPhotoSessionActive()) return false
         return _state.value == ConversationState.LISTENING &&
             isAutoMode &&
             audioManager.isRecording() &&
@@ -645,8 +566,16 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         return true
     }
 
-    /** 下行 TTS：SPEAKING/PROCESSING 播放；LISTENING 仅在未录音或问候窗口播放 */
+    /** 下行 TTS：SPEAKING/PROCESSING 播放；LISTENING 仅在未录音或问候/拍照窗口播放 */
     private fun shouldPlayDownlinkAudio(): Boolean {
+        if (XiaozhiAppEvents.isPhotoSessionActive()) {
+            return when (_state.value) {
+                ConversationState.SPEAKING,
+                ConversationState.LISTENING,
+                ConversationState.PROCESSING -> true
+                else -> false
+            }
+        }
         if (isWakeGreetingTurn() && _state.value == ConversationState.SPEAKING) {
             return true
         }
@@ -811,8 +740,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     /**
      * 物理拍照键（142）：
-     * - 待机 / 聆听 → 本地拍照（不向小智发送「拍照」文字）
-     * - 其他状态忽略
+     * - 待机 → 发送「拍照」唤醒词给服务器，由服务端调 MCP take_photo
+     * - 聆听 → 发送「拍照」文字给服务器，由服务端调 MCP take_photo
      */
     fun onPhotoKeyPressed() {
         if (!XiaozhiAppEvents.consumePhotoKeyPressEvent()) {
@@ -820,12 +749,18 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             return
         }
         if (!conversationUiActive) {
-            Log.d(TAG, "拍照键：对话页未就绪")
+            Log.d(TAG, "拍照键：对话页未就绪，待页面就绪后发送「拍照」")
             pendingPhotoFromStandby = true
+            if (!_isConnected.value) connect()
+            schedulePhotoKeyRetry()
             return
         }
         if (XiaozhiAppEvents.isPhotoSessionActive()) {
             Log.d(TAG, "拍照键：拍照会话进行中，忽略")
+            return
+        }
+        if (pendingSessionEnd || pendingVoiceWake || isWakeHandoffInProgress()) {
+            Log.d(TAG, "拍照键：交接/结束语中，忽略")
             return
         }
         when (_state.value) {
@@ -837,64 +772,108 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private fun tryHandlePendingPhotoKey() {
         if (!pendingPhotoFromStandby) return
-        if (!conversationUiActive || !_isConnected.value) return
-        if (_state.value != ConversationState.IDLE) {
-            pendingPhotoFromStandby = false
+        if (!conversationUiActive) {
+            Log.d(TAG, "pendingPhoto: 对话页未就绪")
+            schedulePhotoKeyRetry()
+            return
+        }
+        if (!_isConnected.value) {
+            Log.d(TAG, "pendingPhoto: 等待 WebSocket 连接")
+            schedulePhotoKeyRetry()
+            return
+        }
+        if (_state.value == ConversationState.CONNECTING) {
+            _state.value = ConversationState.IDLE
+        }
+        if (_state.value != ConversationState.IDLE && _state.value != ConversationState.LISTENING) {
+            Log.d(TAG, "pendingPhoto: 等待 IDLE/LISTENING，当前=${_state.value}")
+            schedulePhotoKeyRetry()
+            return
+        }
+        if (pendingSessionEnd || pendingVoiceWake || isWakeHandoffInProgress()) {
+            Log.d(TAG, "pendingPhoto: 交接中，稍后重试")
+            schedulePhotoKeyRetry()
             return
         }
         pendingPhotoFromStandby = false
-        executePhotoWakeDetect()
+        pendingPhotoRetryJob?.cancel()
+        if (_state.value == ConversationState.LISTENING) {
+            sendPhotoTextInConversation()
+        } else {
+            executePhotoWakeDetect()
+        }
+    }
+
+    private fun schedulePhotoKeyRetry() {
+        if (!pendingPhotoFromStandby) return
+        if (pendingPhotoRetryJob?.isActive == true) return
+        pendingPhotoRetryJob = viewModelScope.launch {
+            delay(300)
+            tryHandlePendingPhotoKey()
+        }
     }
 
     private fun sendPhotoWakeFromStandby() {
-        if (_state.value != ConversationState.IDLE) {
-            Log.d(TAG, "待机拍照：非 IDLE state=${_state.value}")
-            return
-        }
         if (pendingSessionEnd || pendingVoiceWake || isWakeHandoffInProgress()) {
             Log.d(TAG, "待机拍照：交接/结束语中，忽略")
             return
         }
+        pendingPhotoFromStandby = true
         if (!_isConnected.value) {
-            pendingPhotoFromStandby = true
             connect()
             Log.d(TAG, "待机拍照：等待 WebSocket 连接")
-            return
         }
-        executePhotoWakeDetect()
+        tryHandlePendingPhotoKey()
     }
 
     private fun executePhotoWakeDetect() {
-        if (_state.value != ConversationState.IDLE || !_isConnected.value) return
+        if (!_isConnected.value) {
+            pendingPhotoFromStandby = true
+            schedulePhotoKeyRetry()
+            return
+        }
+        if (_state.value == ConversationState.CONNECTING) {
+            _state.value = ConversationState.IDLE
+        }
+        if (_state.value != ConversationState.IDLE) {
+            pendingPhotoFromStandby = true
+            schedulePhotoKeyRetry()
+            return
+        }
         pauseWakeListening()
-        webSocketManager.sendStopListening()
         pendingAutoStart = false
-        transitionState(ConversationState.PROCESSING, "photo_wake_detect")
-        // 按文档：待机下拍照键 → 发「拍照」唤醒词给服务端，由服务端调 MCP take_photo
+        isAutoMode = true
         hideNextSttEcho = true
+        XiaozhiAppEvents.beginPhotoSession()
+        transitionState(ConversationState.PROCESSING, "photo_wake_detect")
         webSocketManager.sendWakeWordDetected("拍照")
-        Log.i(TAG, "待机拍照键：发送「拍照」detect 给服务端，等待 MCP take_photo")
-        VoiceFlowLog.snapshot("photoKey.standby", "send 拍照 detect")
+        webSocketManager.sendStopListening()
+        Log.i(TAG, "待机拍照键：已发送「拍照」给服务器，等待 MCP take_photo")
+        VoiceFlowLog.snapshot("photoKey.standby", "send 拍照 detect → MCP")
     }
 
     private fun sendPhotoTextInConversation() {
-        if (_state.value != ConversationState.LISTENING || !_isConnected.value) {
-            Log.d(TAG, "聆听拍照：状态不可用 state=${_state.value} connected=${_isConnected.value}")
+        if (!_isConnected.value) {
+            Log.d(TAG, "聆听拍照：未连接")
+            pendingPhotoFromStandby = true
+            connect()
+            schedulePhotoKeyRetry()
             return
         }
-        if (pendingSessionEnd) {
-            Log.d(TAG, "聆听拍照：结束语等待中，忽略")
+        if (_state.value != ConversationState.LISTENING) {
+            Log.d(TAG, "聆听拍照：状态不可用 state=${_state.value}")
             return
         }
         audioManager.stopRecording()
         webSocketManager.sendStopListening()
         pendingAutoStart = false
-        transitionState(ConversationState.PROCESSING, "photo_key_listening")
-        // 按文档：对话中拍照键 → 直接发「拍照」文字给服务端，由服务端调 MCP take_photo
+        isAutoMode = true
+        XiaozhiAppEvents.beginPhotoSession()
+        transitionState(ConversationState.PROCESSING, "photo_key_text")
         hideNextSttEcho = true
-        webSocketManager.sendWakeWordDetected("拍照")
-        Log.i(TAG, "聆听拍照键：发送「拍照」文字给服务端，等待 MCP take_photo")
-        VoiceFlowLog.snapshot("photoKey.listening", "send 拍照 text")
+        webSocketManager.sendTextRequest("拍照")
+        Log.i(TAG, "聆听拍照键：已发送「拍照」给服务器，等待 MCP take_photo")
+        VoiceFlowLog.snapshot("photoKey.listening", "send 拍照 text → MCP")
     }
 
     private fun stopConversationFromVoiceKey() {
@@ -1408,6 +1387,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private fun scheduleSpeakingWatchdog() {
+        if (XiaozhiAppEvents.isPhotoSessionActive()) {
+            VoiceFlowLog.step("tts.watchdog", "跳过（拍照会话等待识别播报）")
+            return
+        }
         if (isWakeGreetingTurn() || _isWakeGreetingPlaying.value ||
             listenHandoffJob?.isActive == true || pendingSessionEnd
         ) {
@@ -1837,6 +1820,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     prepareStandbyWakeListening()
                     return
                 }
+                if (_state.value == ConversationState.CONNECTING) {
+                    _state.value = ConversationState.IDLE
+                }
                 tryHandlePendingVoiceWake()
                 tryHandlePendingRecordKeyStart()
                 tryHandlePendingPhotoKey()
@@ -2058,12 +2044,12 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     }
                     val emotion = json.get("emotion")?.asString
                     val text = json.get("text")?.asString
-                    if (isWakeGreetingWindow() && !text.isNullOrBlank() && isLikelyEmotionOnly(text)) {
-                        Log.d(TAG, "唤醒问候窗口内忽略纯表情 LLM")
+                    if (text.isNullOrBlank() || isLikelyEmotionOnly(text)) {
+                        Log.d(TAG, "LLM emotion=$emotion（纯表情，不写入聊天气泡）")
                         return@handleTextMessage
                     }
                     Log.d(TAG, "LLM emotion=$emotion text=$text")
-                    if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
+                    if (shouldApplyServerAssistantText(text)) {
                         updateAssistantMessage(text)
                     }
                 }
@@ -2134,6 +2120,19 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                                 if (isWakeGreetingTurn()) {
                                     markWakeGreetingTtsStart()
                                     Log.d(TAG, "唤醒问候播放中，保持聆听")
+                                    return@handleTextMessage
+                                }
+                                if (XiaozhiAppEvents.isPhotoSessionActive()) {
+                                    audioManager.stopRecording()
+                                    transitionState(ConversationState.SPEAKING, "photo_tts_start")
+                                    cancelSpeakingWatchdog()
+                                    VoiceFlowLog.decision(
+                                        "msg.tts.start",
+                                        "→SPEAKING",
+                                        true,
+                                        "拍照结果播报",
+                                    )
+                                    Log.i(TAG, "拍照结果 TTS start → SPEAKING")
                                     return@handleTextMessage
                                 }
                                 VoiceFlowLog.decision(
@@ -2721,3 +2720,4 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         audioManager.cleanup()
     }
 }
+

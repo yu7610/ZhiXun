@@ -98,9 +98,7 @@ object XiaozhiVisionClient {
     }
 
     private fun parseDetectImageResponse(raw: String, filename: String): VisionExplainResult {
-        val root = JsonParser.parseString(raw).asJsonObject
-        val data = root.getAsJsonObject("data")
-        val text = data?.get("text")?.asString?.trim().orEmpty()
+        val text = extractDetectText(raw)
         val responseText = if (text.isNotBlank()) {
             JsonObject().apply {
                 addProperty("success", true)
@@ -120,6 +118,19 @@ object XiaozhiVisionClient {
             rawJson = raw,
         )
     }
+
+    /** 解析 data.text；无效或缺失时返回空串（上层回「无安全隐患」） */
+    private fun extractDetectText(raw: String): String = runCatching {
+        val root = JsonParser.parseString(raw).asJsonObject
+        val data = root.getAsJsonObject("data") ?: return ""
+        val element = data.get("text") ?: return ""
+        when {
+            element.isJsonNull -> ""
+            element.isJsonPrimitive && element.asJsonPrimitive.isString ->
+                element.asString.trim()
+            else -> element.toString().trim()
+        }
+    }.getOrDefault("")
 
     /** 展示/语音播报用：从 detect 结果中提取可读文本 */
     fun displayTextFromResult(result: VisionExplainResult): String {

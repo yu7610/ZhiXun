@@ -4,35 +4,18 @@ import android.app.Application
 import android.util.Log
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.network.WebSocketManager
-import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * 将执法仪照片压缩后上传隐患检测 HTTP 接口；识别结果仅本地展示，不发送给小智。
+ * MCP 拍照：压缩后上传隐患检测 HTTP 接口，结果通过 sendMcpToolResult 回传服务器。
  */
 object XiaozhiPhotoUploader {
 
     private const val TAG = "XiaozhiPhoto"
     private const val CONNECT_WAIT_MS = 15_000L
-
-    suspend fun uploadPhoto(
-        application: Application,
-        photoFile: File,
-        prompt: String = "请描述这张照片",
-    ): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
-            val visionResult = uploadPhotoForMcp(application, photoFile, prompt).getOrThrow()
-            val displayText = XiaozhiVisionClient.displayTextFromResult(visionResult)
-            Log.i(TAG, "视觉结果仅本地展示 len=${displayText.length}")
-            displayText
-        }.onFailure { e ->
-            Log.e(TAG, "上传照片失败", e)
-            XiaozhiAppEvents.endPhotoSession()
-        }
-    }
 
     suspend fun uploadPhotoForMcp(
         application: Application,
@@ -56,13 +39,8 @@ object XiaozhiPhotoUploader {
             val macAddress = ConfigManager(application).loadConfig().macAddress
             Log.i(
                 TAG,
-                "上传照片 ${photoFile.name} size=${jpegBytes.size} bytes session=${webSocket.getSessionId()}",
+                "MCP 上传照片 ${photoFile.name} size=${jpegBytes.size} bytes session=${webSocket.getSessionId()}",
             )
-
-            XiaozhiAppEvents.beginPhotoSession()
-            XiaozhiWakeForegroundService.pauseListening(application)
-            webSocket.sendStopListening()
-            delay(250)
 
             XiaozhiVisionClient.detectImageFile(
                 context = application,
@@ -71,7 +49,7 @@ object XiaozhiPhotoUploader {
                 filename = photoFile.name,
             ).getOrThrow()
         }.onFailure { e ->
-            Log.e(TAG, "视觉上传失败", e)
+            Log.e(TAG, "MCP 视觉上传失败", e)
         }
     }
 

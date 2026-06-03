@@ -41,5 +41,6 @@ object PhysicalKeyLifecycle {
         })
 
         RecordKeyRegistrar.register(application)
+        PhotoKeyRegistrar.register(application)
     }
 }

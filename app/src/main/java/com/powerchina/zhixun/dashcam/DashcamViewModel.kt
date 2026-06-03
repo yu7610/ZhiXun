@@ -4,8 +4,6 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
-import java.io.File
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,38 +44,6 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         if (session != null) {
             tryAutoStartRecording()
         }
-    }
-
-    fun takePhoto() {
-        capturePhoto { result ->
-            result.onSuccess {
-                _message.value = "照片已保存：${it.name}"
-            }.onFailure {
-                _message.value = it.message ?: "拍照失败"
-            }
-        }
-    }
-
-    /** 拍照并在聊天界面展示、上传小智（不跳转页面） */
-    fun takePhotoAndShareToChat() {
-        capturePhoto { result ->
-            result.onSuccess { file ->
-                _message.value = "照片已保存：${file.name}"
-                XiaozhiAppEvents.sharePhotoToChat(file)
-            }.onFailure { err ->
-                _message.value = err.message ?: "拍照失败"
-            }
-        }
-    }
-
-    private fun capturePhoto(onResult: (Result<File>) -> Unit) {
-        val session = cameraSession
-        if (session == null) {
-            onResult(Result.failure(IllegalStateException("相机未就绪")))
-            return
-        }
-        val file = DashcamRecordingStore.createPhotoFile(app)
-        session.takePicture(file, onResult)
     }
 
     fun stopRecordingIfActive() {

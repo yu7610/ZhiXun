@@ -1,9 +1,11 @@
 package com.powerchina.zhixun.location
 
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import com.powerchina.zhixun.dashcam.VideoKeyActivityHelper
 import com.powerchina.zhixun.ui.theme.YTheme
 import com.powerchina.zhixun.util.ScreenOnHelper
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
@@ -22,5 +24,20 @@ class LocationActivity : ComponentActivity() {
                 LocationScreen(onBack = { finish() })
             }
         }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
+        return super.onKeyUp(keyCode, event)
     }
 }

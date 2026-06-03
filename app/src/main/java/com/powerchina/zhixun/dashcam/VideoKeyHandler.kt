@@ -79,17 +79,30 @@ object VideoKeyHandler {
     fun resolveKeyAction(action: String): DashcamVideoKeyEvents.KeyAction? {
         return when (action) {
             VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY,
+            VideoKeyReceiver.ACTION_CAMERA_BUTTON,
+            VideoKeyReceiver.ACTION_PRESS_CAMERA_KEY,
             "intent.action.PRESS_VIDEO_KEY",
             "com.android.intent.action.PRESS_VIDEO_KEY",
+            "intent.action.PRESS_CAMERA_KEY",
+            "com.android.intent.action.PRESS_CAMERA_KEY",
+            "com.android.camera.action.CAMERA_BUTTON",
             -> DashcamVideoKeyEvents.KeyAction.PHOTO
 
             VideoKeyReceiver.ACTION_LONG_PRESS_VIDEO_KEY,
+            VideoKeyReceiver.ACTION_LONG_PRESS_CAMERA_KEY,
             "intent.action.LONG_PRESS_VIDEO_KEY",
             "com.android.intent.action.LONG_PRESS_VIDEO_KEY",
+            "intent.action.LONG_PRESS_CAMERA_KEY",
+            "com.android.intent.action.LONG_PRESS_CAMERA_KEY",
             -> DashcamVideoKeyEvents.KeyAction.RECORD
 
             else -> null
         }
+    }
+
+    /** 从任意页面触发：发送「拍照」给服务器，由 MCP 回调拍照 */
+    fun requestServerPhoto(context: Context) {
+        dispatchPhotoKey(context)
     }
 
     private fun dispatchPhotoKey(context: Context) {
@@ -113,6 +126,7 @@ object VideoKeyHandler {
             "物理键映射: keyCode=${PhysicalKeyCodes.PHOTO}(拍照) keyCode=${PhysicalKeyCodes.RECORD}(录像)\n" +
                 "广播测试:\n" +
                 "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY} -p $pkg\n" +
+                "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_CAMERA_BUTTON} -p $pkg\n" +
                 "  adb shell am broadcast -a ${VideoKeyReceiver.ACTION_LONG_PRESS_VIDEO_KEY} -p $pkg",
         )
     }

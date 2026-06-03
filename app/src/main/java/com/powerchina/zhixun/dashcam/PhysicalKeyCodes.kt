@@ -25,9 +25,22 @@ object PhysicalKeyCodes {
         return false
     }
 
+    fun isPhotoKey(keyCode: Int, scanCode: Int = 0): Boolean {
+        if (keyCode == PHOTO || keyCode == KeyEvent.KEYCODE_CAMERA) return true
+        if (keyCode == KeyEvent.KEYCODE_FOCUS) return true
+        if (scanCode == PHOTO_SCAN_CODE) return true
+        if (keyCode == KeyEvent.KEYCODE_UNKNOWN && scanCode == PHOTO_SCAN_CODE) return true
+        return false
+    }
+
+    /** 部分 OEM 拍照键 scanCode（设备实测 keyCode=142 scanCode=88） */
+    const val PHOTO_SCAN_CODE = 88
+
     fun actionForKeyCode(keyCode: Int): DashcamVideoKeyEvents.KeyAction? {
         return when (keyCode) {
-            PHOTO -> DashcamVideoKeyEvents.KeyAction.PHOTO
+            PHOTO,
+            KeyEvent.KEYCODE_CAMERA,
+            -> DashcamVideoKeyEvents.KeyAction.PHOTO
             RECORD -> DashcamVideoKeyEvents.KeyAction.RECORD
             else -> null
         }

@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.os.Environment
 import android.os.StatFs
 import android.util.Log
+import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import androidx.camera.core.CameraSelector
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -204,9 +205,9 @@ fun DashcamScreen(
                 onAudio = {
                     scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_feature_coming)) }
                 },
-                onPhoto = { viewModel.takePhotoAndShareToChat() },
+                onPhoto = { VideoKeyHandler.requestServerPhoto(context) },
                 onRecordToggle = { viewModel.toggleRecording() },
-                onUpload = { viewModel.takePhotoAndShareToChat() },
+                onUpload = { VideoKeyHandler.requestServerPhoto(context) },
                 onPlayback = {
                     if (clips.isEmpty()) {
                         scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_no_clip_playback)) }

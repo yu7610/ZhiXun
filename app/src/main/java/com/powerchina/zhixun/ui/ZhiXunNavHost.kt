@@ -67,22 +67,6 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
         }
 
         LaunchedEffect(Unit) {
-            XiaozhiAppEvents.photoShareRequests.collect { photoFile ->
-                Log.i(TAG, "收到分享照片到聊天 ${photoFile.name}")
-                val cfg = configManager.loadConfig()
-                if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) return@collect
-                conversationViewModel.updateConfig(cfg)
-                sessionManager.ensureConnected()
-                if (navController.currentDestination?.route != AppRoutes.Conversation) {
-                    navController.navigate(AppRoutes.Conversation) {
-                        popUpTo(AppRoutes.Conversation) { inclusive = true }
-                        launchSingleTop = true
-                    }
-                }
-            }
-        }
-
-        LaunchedEffect(Unit) {
             XiaozhiAppEvents.requests.collect { req ->
                 Log.i(
                     TAG,

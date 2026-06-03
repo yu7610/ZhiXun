@@ -133,17 +133,16 @@ object XiaozhiMcpHandler {
                     id,
                     XiaozhiVisionClient.buildToolCallResult(visionResult.response),
                 )
-                XiaozhiAppEvents.emitPhotoResult(
-                    PhotoResult(
-                        file = photoFile,
-                        uploadResult = Result.success(Unit),
-                        visionDescription = XiaozhiVisionClient.displayTextFromResult(visionResult),
-                    ),
-                )
                 Log.i(TAG, "MCP tools/call 拍照完成 question=$question")
             } catch (e: Exception) {
                 Log.e(TAG, "MCP tools/call 失败", e)
                 webSocket.sendMcpError(id, e.message ?: "拍照失败")
+                XiaozhiAppEvents.emitPhotoResult(
+                    PhotoResult(
+                        file = null,
+                        uploadResult = Result.failure(e),
+                    ),
+                )
                 XiaozhiAppEvents.endPhotoSession()
             }
         }

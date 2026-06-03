@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
+
 /**
  * 应用进程内动态注册录像键广播（部分 OEM 仅发给动态 Receiver）。
  */
@@ -18,8 +19,12 @@ object VideoKeyRegistrar {
         val appContext = context.applicationContext
         val filter = IntentFilter().apply {
             priority = IntentFilter.SYSTEM_HIGH_PRIORITY
-            addAction(VideoKeyReceiver.ACTION_PRESS_VIDEO_KEY)
             addAction(VideoKeyReceiver.ACTION_LONG_PRESS_VIDEO_KEY)
+            addAction(VideoKeyReceiver.ACTION_LONG_PRESS_CAMERA_KEY)
+            addAction("intent.action.LONG_PRESS_VIDEO_KEY")
+            addAction("intent.action.LONG_PRESS_CAMERA_KEY")
+            addAction("com.android.intent.action.LONG_PRESS_VIDEO_KEY")
+            addAction("com.android.intent.action.LONG_PRESS_CAMERA_KEY")
             addCategory(Intent.CATEGORY_DEFAULT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

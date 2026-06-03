@@ -37,6 +37,9 @@ object PhysicalKeyInterceptor {
         if (PhysicalKeyCodes.isRecordKey(keyCode, scanCode)) {
             return dispatchBlockedKeyEvent(context, event)
         }
+        if (PhysicalKeyCodes.isPhotoKey(keyCode, scanCode)) {
+            return dispatchPhotoKeyEvent(context, event)
+        }
         if (PhysicalKeyCodes.isMappedKey(keyCode)) {
             return dispatchMappedKeyEvent(context, event)
         }
@@ -60,6 +63,32 @@ object PhysicalKeyInterceptor {
     fun dispatchVideoBroadcast(context: Context, intent: Intent?): Boolean {
         if (!isAppInForeground) return false
         return VideoKeyHandler.handleBroadcast(context, intent)
+    }
+
+    /** keyCode=142 拍照、keyCode=136 录像：抬起时触发，不做短长按区分 */
+    private fun dispatchPhotoKeyEvent(context: Context, event: KeyEvent): Boolean {
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    Log.d(
+                        TAG,
+                        "拍照键按下 keyCode=${event.keyCode} " +
+                            "(${KeyEvent.keyCodeToString(event.keyCode)}) scanCode=${event.scanCode}",
+                    )
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                Log.i(
+                    TAG,
+                    "拍照键抬起 keyCode=${event.keyCode} " +
+                        "(${KeyEvent.keyCodeToString(event.keyCode)}) scanCode=${event.scanCode}",
+                )
+                VideoKeyHandler.requestServerPhoto(context)
+                return true
+            }
+        }
+        return true
     }
 
     /** keyCode=142 拍照、keyCode=136 录像：抬起时触发，不做短长按区分 */
@@ -109,15 +138,25 @@ object PhysicalKeyInterceptor {
         return true
     }
 
-    /** 其它录像相关键：保留短按/长按兼容 */
+    /** 其它录像/相机相关键：拦截系统默认行为；相机键转给应用内拍照 */
     private fun dispatchLegacyVideoKeyEvent(context: Context, event: KeyEvent): Boolean {
-        // 未映射的 legacy 键仅消费，避免触发系统行为
-        if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-            Log.d(
-                TAG,
-                "Legacy 录像键按下 keyCode=${event.keyCode} " +
-                    "(${KeyEvent.keyCodeToString(event.keyCode)})",
-            )
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    Log.d(
+                        TAG,
+                        "Legacy 键按下 keyCode=${event.keyCode} " +
+                            "(${KeyEvent.keyCodeToString(event.keyCode)})",
+                    )
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                if (PhysicalKeyCodes.isPhotoKey(event.keyCode, event.scanCode)) {
+                    VideoKeyHandler.requestServerPhoto(context)
+                }
+                return true
+            }
         }
         return true
     }
@@ -132,6 +171,7 @@ object PhysicalKeyInterceptor {
         if (keyCode in PASSTHROUGH_KEY_CODES) return false
 
         if (PhysicalKeyCodes.isMappedKey(keyCode)) return true
+        if (PhysicalKeyCodes.isPhotoKey(keyCode, event.scanCode)) return true
         if (PhysicalKeyCodes.isRecordKey(keyCode, event.scanCode)) return true
         if (isLegacyVideoRelatedKey(keyCode)) return true
         if (keyCode in HARDWARE_KEY_CODES) return true

@@ -12,7 +12,6 @@ import com.powerchina.zhixun.location.BaiduSdkInitializer
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import com.powerchina.zhixun.xiaozhi.XiaozhiLifecycle
 import com.powerchina.zhixun.xiaozhi.XiaozhiMcpHandler
-import com.powerchina.zhixun.xiaozhi.XiaozhiPhotoCoordinator
 
 class ZhiXunApplication : Application(), CameraXConfig.Provider {
 
@@ -27,7 +26,6 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         VideoKeyRegistrar.register(this)
         VideoKeyHandler.logTestCommands(this)
         XiaozhiLifecycle.register(this)
-        XiaozhiPhotoCoordinator.register(this)
         XiaozhiMcpHandler.register(this)
         XiaozhiWakeForegroundService.ensureStarted(this)
     }

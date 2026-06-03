@@ -16,9 +16,7 @@ data class OpenConversationRequest(
 data class PhotoResult(
     val file: java.io.File?,
     val uploadResult: Result<Unit>,
-    /** HTTP 视觉接口返回的描述文本（已解析，非原始 JSON） */
-    val visionDescription: String? = null,
-    /** 拍照完成、识别尚未返回时先发预览 */
+    /** MCP 拍照完成、识别尚未返回时先发预览 */
     val captureOnly: Boolean = false,
 )
 
@@ -34,14 +32,7 @@ object XiaozhiAppEvents {
     )
     val requests: SharedFlow<OpenConversationRequest> = _requests.asSharedFlow()
 
-    private val _photoCaptureRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    val photoCaptureRequests: SharedFlow<Unit> = _photoCaptureRequests.asSharedFlow()
-
-    private val _photoShareRequests = MutableSharedFlow<java.io.File>(extraBufferCapacity = 1)
-    val photoShareRequests: SharedFlow<java.io.File> = _photoShareRequests.asSharedFlow()
-
     private val _photoResults = MutableSharedFlow<PhotoResult>(
-        replay = 1,
         extraBufferCapacity = 1,
     )
     val photoResults: SharedFlow<PhotoResult> = _photoResults.asSharedFlow()
@@ -104,7 +95,7 @@ object XiaozhiAppEvents {
         pendingVoiceKeyPress = false
     }
 
-    /** 拍照上传/等待小智视觉回复期间，禁止恢复后台唤醒监听 */
+    /** MCP 拍照/等待服务器回复期间，禁止恢复后台唤醒监听 */
     @Volatile
     var photoSessionActive: Boolean = false
         private set
@@ -122,7 +113,7 @@ object XiaozhiAppEvents {
 
     fun isPhotoSessionActive(): Boolean = photoSessionActive
 
-    /** 对话页 Compose 是否在前台（用于拍照时避免重复拉起 Activity） */
+    /** 对话页 Compose 是否在前台 */
     @Volatile
     var conversationScreenVisible: Boolean = false
         private set
@@ -173,16 +164,6 @@ object XiaozhiAppEvents {
         lastConsumedPhotoKeyEpoch = photoKeyEpoch
         pendingPhotoKeyPress = false
         return true
-    }
-
-    fun requestPhotoCapture() {
-        val emitted = _photoCaptureRequests.tryEmit(Unit)
-        Log.i(TAG, "requestPhotoCapture emitted=$emitted")
-    }
-
-    fun sharePhotoToChat(photoFile: java.io.File) {
-        val emitted = _photoShareRequests.tryEmit(photoFile)
-        Log.i(TAG, "sharePhotoToChat file=${photoFile.name} emitted=$emitted")
     }
 
     fun emitPhotoResult(result: PhotoResult) {
