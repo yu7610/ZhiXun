@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         applyVoiceWakeWindowFlags(intent)
         enableEdgeToEdge()
-        ScreenOnHelper.keepScreenOn(this)
+        ScreenOnHelper.attach(this)
         handleOpenXiaozhiIntent(intent)
         XiaozhiWakeForegroundService.ensureStarted(this)
         setContent {
@@ -38,8 +38,21 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            ScreenOnHelper.onUserInteraction(this)
+        }
         if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
         return super.dispatchKeyEvent(event)
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        ScreenOnHelper.onUserInteraction(this)
+    }
+
+    override fun onDestroy() {
+        ScreenOnHelper.detach(this)
+        super.onDestroy()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {

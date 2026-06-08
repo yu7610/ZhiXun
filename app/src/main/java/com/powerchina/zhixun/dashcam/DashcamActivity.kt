@@ -14,7 +14,7 @@ class DashcamActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        ScreenOnHelper.keepScreenOn(this)
+        ScreenOnHelper.attach(this)
         XiaozhiWakeForegroundService.ensureStarted(this)
         setContent {
             DashcamScreen(onBack = { finish() })
@@ -22,8 +22,21 @@ class DashcamActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            ScreenOnHelper.onUserInteraction(this)
+        }
         if (VideoKeyActivityHelper.dispatchKeyEvent(this, event)) return true
         return super.dispatchKeyEvent(event)
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        ScreenOnHelper.onUserInteraction(this)
+    }
+
+    override fun onDestroy() {
+        ScreenOnHelper.detach(this)
+        super.onDestroy()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
