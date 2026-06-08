@@ -187,6 +187,26 @@ object XiaozhiAppEvents {
 
     fun isPhotoSessionActive(): Boolean = photoSessionActive
 
+    /**
+     * 用户语音打断拍照：仅清除会话与相机占用，不触发成功/失败恢复回调。
+     * 递增 generation，使仍在途的 MCP finally 忽略过期会话。
+     */
+    fun abortPhotoSession(reason: String) {
+        if (!photoSessionActive && photoSessionGeneration == 0L) {
+            Log.d(PhotoKeyLog.TAG, "abortPhotoSession 无活动会话 reason=$reason")
+            return
+        }
+        mainHandler.removeCallbacks(photoSessionTimeoutRunnable)
+        val wasActive = photoSessionActive
+        photoSessionActive = false
+        photoSessionGeneration++
+        SharedCameraCapture.forceReset()
+        Log.i(
+            PhotoKeyLog.TAG,
+            "abortPhotoSession reason=$reason wasActive=$wasActive gen=$photoSessionGeneration",
+        )
+    }
+
     /** 由 [ConversationViewModel] 注册：仅待机/聆听允许拍照键 */
     @Volatile
     var photoKeyGate: () -> Boolean = { true }

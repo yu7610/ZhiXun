@@ -3,8 +3,6 @@ package com.powerchina.zhixun.dashcam
 import android.content.Context
 import android.util.Log
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
-import com.powerchina.zhixun.xiaozhi.PhotoResult
-import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import java.io.File
 
 /**
@@ -52,15 +50,6 @@ object SharedCameraCapture {
             return
         }
         QuickPhotoCapture.capture(context) { result ->
-            result.onSuccess { file ->
-                XiaozhiAppEvents.emitPhotoResult(
-                    PhotoResult(
-                        file = file,
-                        uploadResult = Result.success(Unit),
-                        captureOnly = true,
-                    ),
-                )
-            }
             finish(result)
         }
     }

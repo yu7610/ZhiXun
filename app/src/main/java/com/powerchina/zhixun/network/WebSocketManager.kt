@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -146,14 +147,16 @@ class WebSocketManager(private val context: Context) {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (isStale()) return
-                val isMcp = try {
-                    gson.fromJson(text, JsonObject::class.java).get("type")?.asString == "mcp"
+                val msgType = try {
+                    gson.fromJson(text, JsonObject::class.java).get("type")?.asString
                 } catch (_: Exception) {
-                    false
+                    null
                 }
+                val isMcp = msgType == "mcp"
                 if (!isMcp) {
                     Log.d(TAG, "收到文本消息: $text")
                 }
+                Log.i(PhotoKeyLog.TAG, "服务端← ${msgType ?: "unknown"}: $text")
                 textMessageListeners.forEach { listener ->
                     try {
                         listener(text)
@@ -566,6 +569,7 @@ class WebSocketManager(private val context: Context) {
     }
 
     fun sendMcpToolResult(id: Int, result: JsonObject) {
+        Log.i(PhotoKeyLog.TAG, "回传服务端 MCP result id=$id: $result")
         sendMcpPayload(
             JsonObject().apply {
                 addProperty("jsonrpc", "2.0")
@@ -576,6 +580,7 @@ class WebSocketManager(private val context: Context) {
     }
 
     fun sendMcpError(id: Int, message: String) {
+        Log.w(PhotoKeyLog.TAG, "回传服务端 MCP error id=$id: $message")
         sendMcpPayload(
             JsonObject().apply {
                 addProperty("jsonrpc", "2.0")

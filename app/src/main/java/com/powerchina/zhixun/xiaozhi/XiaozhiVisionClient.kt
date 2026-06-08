@@ -75,6 +75,7 @@ object XiaozhiVisionClient {
 
         client(context).newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
+            Log.i(TAG, "隐患检测 HTTP ${response.code} 响应: $raw")
             if (response.code != 200) {
                 throw IllegalStateException("隐患检测 HTTP ${response.code}: $raw")
             }
@@ -111,7 +112,7 @@ object XiaozhiVisionClient {
         }
         Log.i(
             TAG,
-            "隐患检测完成 hasText=${text.isNotBlank()} len=${responseText.length}",
+            "隐患检测解析 text=${text.ifBlank { "(空→无安全隐患)" }} mcpPayload=$responseText",
         )
         return VisionExplainResult(
             success = true,

@@ -315,6 +315,32 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         photoAwaitingMcpCapture = false
     }
 
+    /**
+     * 拍照等待期间用户开麦/唤醒：立即结束拍照轮次，避免卡在「思考中」且 STT 被屏蔽。
+     */
+    private fun abortPhotoSessionForVoiceInput(reason: String) {
+        val hadPhotoRound = XiaozhiAppEvents.isPhotoSessionActive() ||
+            photoAwaitingMcpCapture ||
+            stateBeforePhotoRound != null ||
+            photoRoundAwaitingTtsFinish
+        if (!hadPhotoRound) return
+
+        Log.i(PhotoKeyLog.TAG, "语音打断拍照轮次 reason=$reason state=${_state.value}")
+        XiaozhiMcpHandler.abortStuckCapture("voice_$reason")
+        cancelPhotoMcpWait()
+        cancelPhotoRecoveryJobs()
+        clearPhotoRoundPendingReset()
+        clearPhotoAwaitingMcpCapture()
+        stateBeforePhotoRound = null
+        forceNextAssistantBubble = false
+        hideNextSttEcho = false
+        clearPhotoFailureTtsSuppress()
+        cancelPendingPhotoKey("voice_$reason")
+        XiaozhiAppEvents.abortPhotoSession(reason)
+        XiaozhiMcpHandler.cancelTakePhotoFallback()
+        SharedCameraCapture.releasePreWarm()
+    }
+
     /** MCP 尚未回调 take_photo 时，服务端迟来 TTS 属于上一轮，应丢弃 */
     private fun shouldIgnoreStalePhotoTtsControl(): Boolean =
         XiaozhiAppEvents.isPhotoSessionActive() && photoAwaitingMcpCapture
@@ -497,6 +523,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         forceNextAssistantBubble = false
         hideNextSttEcho = false
         cancelPhotoMcpWait()
+        XiaozhiMcpHandler.cancelTakePhotoFallback()
         cancelSpeakingWatchdog()
         cancelPhotoRecoveryJobs()
         clearPhotoFailureTtsSuppress()
@@ -575,6 +602,31 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             (trimmed.contains("\"success\"") || trimmed.contains("\"filename\""))
     }
 
+    private fun isPhotoMcpToolLeak(text: String): Boolean =
+        XiaozhiMcpHandler.containsTakePhotoToolSignal(text)
+
+    /** 服务端经 STT/TTS 确认拍照意图后，结束「等待 MCP」的 TTS 屏蔽并触发本地拍照 */
+    private fun onPhotoServerSignal(text: String, source: String): Boolean {
+        if (!XiaozhiAppEvents.isPhotoSessionActive()) return false
+        val trimmed = text.trim()
+        val isTakePhotoStt = trimmed == "拍照"
+        val isTakePhotoTool = isPhotoMcpToolLeak(text)
+        if (!isTakePhotoStt && !isTakePhotoTool) return false
+
+        if (photoAwaitingMcpCapture) {
+            Log.i(PhotoKeyLog.TAG, "拍照服务端信号($source)：解除 stale TTS 屏蔽")
+            markPhotoMcpCaptureReceived()
+        }
+        cancelPhotoMcpWait()
+        Log.i(
+            PhotoKeyLog.TAG,
+            "拍照服务端信号($source)：安排延迟 fallback " +
+                "(stt=$isTakePhotoStt tool=$isTakePhotoTool)",
+        )
+        XiaozhiMcpHandler.scheduleTakePhotoFallback(source)
+        return true
+    }
+
     /** 过滤 LLM/TTS 流里泄漏的工具调用标记（如 % get_weather..） */
     private fun sanitizeAssistantText(text: String): String {
         var result = text
@@ -592,6 +644,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun shouldApplyServerAssistantText(incoming: String): Boolean {
         val text = incoming.trim()
         if (text.isBlank()) return false
+        if (isPhotoMcpToolLeak(text)) return false
         val msgs = _messages.value
         val last = msgs.lastOrNull() ?: return true
         if (forceNextAssistantBubble) return true
@@ -1228,6 +1281,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     /** 录音键在「处理中/说话中」按下：打断当前回复，重新进入聆听 */
     @SuppressLint("MissingPermission")
     private fun restartListeningFromVoiceKey() {
+        abortPhotoSessionForVoiceInput("voice_key_interrupt")
         cancelSpeakingWatchdog()
         cancelSessionEndFallback()
         cancelSessionEndStandby()
@@ -1321,6 +1375,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     fun onVoiceWakeDetected() {
         Log.i(TAG, "onVoiceWakeDetected 关键词=${WakePhraseMatcher.WAKE_PHRASE}")
         logFlow("wake.detected", "关键词=${WakePhraseMatcher.WAKE_PHRASE}")
+        abortPhotoSessionForVoiceInput("voice_wake")
         _isSessionEndStandby.value = false
         wakeConversationHandoff = true
         isAutoMode = true
@@ -1762,11 +1817,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 "忽略迟来 TTS finish（等待 MCP capture） trigger=$trigger state=${_state.value}",
             )
             audioManager.stopPlaying()
-            if (_state.value == ConversationState.SPEAKING ||
-                _state.value == ConversationState.LISTENING
-            ) {
-                transitionState(ConversationState.PROCESSING, "stale_photo_tts_finish")
-            }
             return
         }
         if (listenHandoffJob?.isActive == true && isWakeGreetingWindow()) {
@@ -2321,6 +2371,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     if (hideNextSttEcho) {
                         hideNextSttEcho = false
                         Log.i(PhotoKeyLog.TAG, "隐藏短指令 STT 回显: $text")
+                        if (!text.isNullOrEmpty()) {
+                            onPhotoServerSignal(text, "stt_echo")
+                        }
                         return@handleTextMessage
                     }
                     if (shouldSuppressWakeSttEcho(text)) {
@@ -2332,6 +2385,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     if (!text.isNullOrEmpty() && XiaozhiAppEvents.isPhotoSessionActive()) {
                         if (isLikelyVisionJsonEcho(text)) {
                             Log.d(PhotoKeyLog.TAG, "拍照会话中忽略视觉 JSON 回显")
+                            return@handleTextMessage
+                        }
+                        if (onPhotoServerSignal(text, "stt")) {
+                            Log.d(PhotoKeyLog.TAG, "拍照会话 STT 已处理: $text")
                             return@handleTextMessage
                         }
                         Log.d(PhotoKeyLog.TAG, "拍照会话中忽略 STT 回显")
@@ -2413,17 +2470,23 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                             }
                             // TTS句子开始，显示要播放的文本
                             val text = json.get("text")?.asString
+                            if (!text.isNullOrEmpty() && onPhotoServerSignal(text, "tts_sentence_start")) {
+                                return@handleTextMessage
+                            }
                             if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
                                 updateAssistantMessage(text)
                             }
                         }
                         "sentence_end" -> {
+                            val text = json.get("text")?.asString
+                            if (!text.isNullOrEmpty() && onPhotoServerSignal(text, "tts_sentence_end")) {
+                                return@handleTextMessage
+                            }
                             if (shouldIgnoreStaleReplyWhileListening()) {
                                 Log.d(TAG, "聆听中忽略迟来 TTS sentence_end")
                                 return@handleTextMessage
                             }
                             // TTS句子结束，有时包含完整的句子内容
-                            val text = json.get("text")?.asString
                             if (!text.isNullOrEmpty() && shouldApplyServerAssistantText(text)) {
                                 // 检查是否需要更新（如果sentence_start已经包含了这部分内容则跳过，或者直接替换为更完整的text）
                                 // 这里简单处理：如果当前最后一条助手消息内容不包含这段text，则更新/追加
