@@ -14,6 +14,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** MCP 拍照用的后台 CameraX 绑定；按键时 preWarm，会话结束或执法仪页释放。 */
@@ -23,9 +26,13 @@ object McpCameraHolder {
     private const val CAPTURE_DELAY_MS = 50L
     private const val CAPTURE_READY_RETRY_MS = 120L
     private const val CAPTURE_TIMEOUT_MS = 12_000L
+    private const val BIND_TIMEOUT_MS = 8_000L
 
     private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val cameraInitExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "McpCameraInit")
+    }
     private val capturing = AtomicBoolean(false)
 
     @Volatile
@@ -201,49 +208,82 @@ object McpCameraHolder {
             }
             binding = true
         }
-        val mainExecutor = ContextCompat.getMainExecutor(context)
-        ProcessCameraProvider.getInstance(context).addListener(
+        val providerFuture = ProcessCameraProvider.getInstance(context)
+        providerFuture.addListener(
             {
-                var ready = false
-                synchronized(lock) {
-                    binding = false
-                    if (bound && imageCapture != null) {
-                        ready = true
-                    } else {
-                        try {
-                            if (SharedCameraCapture.dashcamSession != null) {
-                                Log.d(TAG, "执法仪占用相机，跳过 MCP 绑定")
-                            } else {
-                                val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-                                val capture = ImageCapture.Builder()
-                                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                                    .build()
-                                cameraProvider.unbindAll()
-                                cameraProvider.bindToLifecycle(
-                                    ProcessLifecycleOwner.get(),
-                                    CameraSelector.DEFAULT_BACK_CAMERA,
-                                    capture,
-                                )
-                                provider = cameraProvider
-                                imageCapture = capture
-                                bound = true
-                                ready = true
-                                Log.d(TAG, "MCP 相机已绑定")
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "MCP 相机绑定失败", e)
-                            resetBindingLocked()
-                        }
-                    }
-                }
-                if (ready) {
-                    onReady?.invoke()
-                } else if (onReady != null) {
-                    mainHandler.postDelayed({ acquire(context, onReady) }, CAPTURE_READY_RETRY_MS)
+                cameraInitExecutor.execute {
+                    bindCameraProvider(context, providerFuture, onReady)
                 }
             },
-            mainExecutor,
+            cameraInitExecutor,
         )
+    }
+
+    private fun bindCameraProvider(
+        context: Context,
+        providerFuture: com.google.common.util.concurrent.ListenableFuture<ProcessCameraProvider>,
+        onReady: (() -> Unit)?,
+    ) {
+        var ready = false
+        try {
+            synchronized(lock) {
+                binding = false
+                if (bound && imageCapture != null) {
+                    ready = true
+                    return@synchronized
+                }
+            }
+            if (SharedCameraCapture.dashcamSession != null) {
+                Log.d(TAG, "执法仪占用相机，跳过 MCP 绑定")
+            } else {
+                val cameraProvider = providerFuture.get(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                val latch = CountDownLatch(1)
+                var bindError: Exception? = null
+                mainHandler.post {
+                    try {
+                        synchronized(lock) {
+                            resetBindingLocked()
+                            val capture = ImageCapture.Builder()
+                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                .build()
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(
+                                ProcessLifecycleOwner.get(),
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                capture,
+                            )
+                            provider = cameraProvider
+                            imageCapture = capture
+                            bound = true
+                            ready = true
+                            Log.d(TAG, "MCP 相机已绑定")
+                        }
+                    } catch (e: Exception) {
+                        bindError = e
+                        Log.w(TAG, "MCP 相机绑定失败", e)
+                        synchronized(lock) {
+                            resetBindingLocked()
+                        }
+                    } finally {
+                        latch.countDown()
+                    }
+                }
+                if (!latch.await(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                    Log.e(TAG, "MCP 相机绑定超时 ${BIND_TIMEOUT_MS}ms")
+                    mainHandler.post { forceResetLocked("bind_timeout") }
+                } else if (bindError != null) {
+                    ready = false
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MCP 相机初始化失败", e)
+            mainHandler.post { forceResetLocked("provider_init_failed") }
+        }
+        if (ready) {
+            onReady?.let { mainHandler.post(it) }
+        } else if (onReady != null) {
+            mainHandler.postDelayed({ acquire(context, onReady) }, CAPTURE_READY_RETRY_MS)
+        }
     }
 
     private fun release() {

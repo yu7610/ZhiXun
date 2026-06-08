@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
-import com.powerchina.zhixun.dashcam.QuickPhotoCapture
 import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 
@@ -26,7 +25,7 @@ class PhotoKeyBlockReceiver : BroadcastReceiver() {
         if (isOrderedBroadcast) {
             abortBroadcast()
         }
-        QuickPhotoCapture.preWarm(context.applicationContext)
+        // 相机预热改到 MCP take_photo 前，避免与上一轮会话争用相机导致主线程 ANR
         // PRESS_PIC_KEY（抬起）仅阻断系统相机；拍照在 DOWN 广播或 KeyEvent 已触发
         if (action != VideoKeyReceiver.ACTION_PRESS_PIC_KEY) {
             VideoKeyHandler.requestServerPhoto(context.applicationContext)

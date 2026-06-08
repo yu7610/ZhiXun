@@ -63,7 +63,9 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                     Log.w(PhotoKeyLog.TAG, "未配置，无法发送拍照指令")
                     return@collect
                 }
-                conversationViewModel.updateConfig(cfg)
+                if (conversationViewModel.needsConfigRefresh(cfg)) {
+                    conversationViewModel.updateConfig(cfg)
+                }
                 sessionManager.ensureConnected()
                 if (navController.currentDestination?.route != AppRoutes.Conversation) {
                     navController.navigate(AppRoutes.Conversation) {

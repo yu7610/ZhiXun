@@ -7,6 +7,7 @@ import android.util.Log
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import androidx.core.content.ContextCompat
+import com.powerchina.zhixun.dashcam.QuickPhotoCapture
 import com.powerchina.zhixun.dashcam.SharedCameraCapture
 import com.powerchina.zhixun.network.WebSocketManager
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
@@ -36,7 +37,7 @@ object XiaozhiMcpHandler {
     /** TTS/STT 信号后留给 MCP tools/call 的窗口，避免与 fallback 抢锁 */
     private const val MCP_FALLBACK_DELAY_MS = 400L
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val photoCaptureInFlight = AtomicBoolean(false)
     private var fallbackJob: Job? = null
 
@@ -230,6 +231,9 @@ object XiaozhiMcpHandler {
             sessionGeneration = XiaozhiAppEvents.currentPhotoSessionGeneration()
             XiaozhiWakeForegroundService.pauseListening(app)
             ensureCameraPermission(app)
+            withContext(Dispatchers.IO) {
+                QuickPhotoCapture.preWarm(app)
+            }
             val photoFile = withTimeout(PHOTO_CAPTURE_TIMEOUT_MS) {
                 capturePhoto(app) ?: throw IllegalStateException("拍照失败，请检查相机权限")
             }
@@ -264,9 +268,10 @@ object XiaozhiMcpHandler {
             recoverMessage = "拍照超时，请重试"
         } catch (e: Exception) {
             Log.e(TAG, "take_photo 失败 trigger=$trigger mcpId=$mcpId", e)
-            sendMcpFailure(webSocket, mcpId, e.message ?: "拍照失败")
+            val userMessage = formatPhotoUploadError(e)
+            sendMcpFailure(webSocket, mcpId, userMessage)
             recoverUi = true
-            recoverMessage = e.message ?: "拍照失败"
+            recoverMessage = userMessage
         } finally {
             pendingMcpReply = null
             photoCaptureInFlight.set(false)
@@ -293,6 +298,18 @@ object XiaozhiMcpHandler {
         pendingMcpReply = null
         pending.webSocket.sendMcpToolResult(pending.id, toolPayload)
         Log.i(TAG, "MCP 排队回复已发送 id=${pending.id}")
+    }
+
+    private val photoHttpError = Regex("""HTTP [45]\d{2}""", RegexOption.IGNORE_CASE)
+
+    private fun formatPhotoUploadError(error: Throwable): String {
+        val raw = error.message?.trim().orEmpty()
+        if (raw.isBlank()) return "拍照失败"
+        if (raw.contains("服务器内部错误") || Regex("""HTTP 5\d{2}""").containsMatchIn(raw)) {
+            return "服务器繁忙，请稍后重试"
+        }
+        if (photoHttpError.containsMatchIn(raw)) return "照片识别失败，请重试"
+        return raw
     }
 
     private fun sendMcpFailure(webSocket: WebSocketManager, mcpId: Int?, message: String) {

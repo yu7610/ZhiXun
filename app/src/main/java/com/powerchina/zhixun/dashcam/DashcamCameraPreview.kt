@@ -13,13 +13,18 @@ import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.Executor
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun DashcamCameraPreview(
@@ -36,6 +41,7 @@ fun DashcamCameraPreview(
             scaleType = PreviewView.ScaleType.FILL_CENTER
         }
     }
+    var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
     AndroidView(
         factory = { previewView },
@@ -43,7 +49,10 @@ fun DashcamCameraPreview(
     )
 
     LaunchedEffect(lensFacing) {
-        val cameraProvider = ProcessCameraProvider.getInstance(context).get()
+        val cameraProvider = withContext(Dispatchers.IO) {
+            ProcessCameraProvider.getInstance(context).get()
+        }
+        cameraProviderRef = cameraProvider
         bindCamera(
             context = context,
             cameraProvider = cameraProvider,
@@ -58,9 +67,8 @@ fun DashcamCameraPreview(
     DisposableEffect(Unit) {
         onDispose {
             onSessionReady(null)
-            runCatching {
-                ProcessCameraProvider.getInstance(context).get().unbindAll()
-            }
+            runCatching { cameraProviderRef?.unbindAll() }
+            cameraProviderRef = null
         }
     }
 }

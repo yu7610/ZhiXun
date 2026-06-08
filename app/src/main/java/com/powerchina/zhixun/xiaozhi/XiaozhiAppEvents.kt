@@ -137,19 +137,23 @@ object XiaozhiAppEvents {
         if (sessionGeneration != null && sessionGeneration != photoSessionGeneration) {
             Log.d(
                 PhotoKeyLog.TAG,
-                "endPhotoSession 忽略过期 gen=$sessionGeneration current=$photoSessionGeneration",
+                "endPhotoSession 过期 gen=$sessionGeneration current=$photoSessionGeneration recoverUi=$recoverUi",
             )
+            if (recoverUi) {
+                val handler = photoSessionRecoverHandler
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    handler?.invoke(recoverMessage)
+                } else {
+                    mainHandler.post { handler?.invoke(recoverMessage) }
+                }
+            }
             return
         }
         val wasActive = photoSessionActive
         if (wasActive) {
             mainHandler.removeCallbacks(photoSessionTimeoutRunnable)
             photoSessionActive = false
-            if (recoverUi) {
-                SharedCameraCapture.forceReset()
-            } else {
-                SharedCameraCapture.releasePreWarm()
-            }
+            SharedCameraCapture.forceReset()
         }
         Log.i(
             PhotoKeyLog.TAG,

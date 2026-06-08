@@ -90,6 +90,7 @@ import com.powerchina.zhixun.dashcam.DashcamActivity
 import com.powerchina.zhixun.location.LocationActivity
 import com.powerchina.zhixun.data.Message
 import com.powerchina.zhixun.data.MessageRole
+import com.powerchina.zhixun.util.ScreenOnHelper
 import com.powerchina.zhixun.viewmodel.ConversationState
 import com.powerchina.zhixun.viewmodel.ConversationViewModel
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
@@ -169,6 +170,29 @@ fun ConversationScreen(
             viewModel.onConversationScreenReady()
         } else {
             permissionsState.launchMultiplePermissionRequest()
+        }
+    }
+
+    val isStandbyDisplay = isStandbyUiDisplayed(
+        state = conversationState,
+        isStandbyReady = isStandbyReady,
+        isSessionEndStandby = isSessionEndStandby,
+        isStandbyReconnecting = isStandbyReconnecting,
+        isWakeGreetingPlaying = isWakeGreetingPlaying,
+        isWakeHandoffActive = isWakeHandoffActive,
+    )
+    val activity = remember(view) { view.context as? Activity }
+    LaunchedEffect(isStandbyDisplay) {
+        val host = activity ?: return@LaunchedEffect
+        if (isStandbyDisplay) {
+            ScreenOnHelper.enterStandbyMode(host)
+        } else {
+            ScreenOnHelper.exitStandbyMode(host)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            activity?.let { ScreenOnHelper.exitStandbyMode(it) }
         }
     }
 
@@ -421,6 +445,22 @@ private fun TopBar(
             )
         }
     }
+}
+
+/** 与状态栏「待机」文案一致：此期间启动 10s 变暗 / 20s 黑屏 */
+private fun isStandbyUiDisplayed(
+    state: ConversationState,
+    isStandbyReady: Boolean,
+    isSessionEndStandby: Boolean,
+    isStandbyReconnecting: Boolean,
+    isWakeGreetingPlaying: Boolean,
+    isWakeHandoffActive: Boolean,
+): Boolean {
+    if (isWakeGreetingPlaying || isWakeHandoffActive) return false
+    if (isSessionEndStandby || isStandbyReconnecting) {
+        return state == ConversationState.IDLE || state == ConversationState.CONNECTING
+    }
+    return state == ConversationState.IDLE && isStandbyReady
 }
 
 @Composable

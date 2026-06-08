@@ -29,9 +29,9 @@ object XiaozhiPhotoUploader {
             val webSocket = sessionManager.webSocketManager
             waitForConnection(webSocket)
 
-            var jpegBytes = compressJpegForUpload(photoFile)
+            var jpegBytes = compressJpegForUpload(photoFile, maxWidth = 480, quality = 70)
             if (jpegBytes.size > 180_000) {
-                jpegBytes = compressJpegForUpload(photoFile, maxWidth = 480, quality = 65)
+                jpegBytes = compressJpegForUpload(photoFile, maxWidth = 360, quality = 60)
             }
             if (jpegBytes.size > 180_000) {
                 throw IllegalStateException("照片过大(${jpegBytes.size} bytes)，请靠近拍摄")

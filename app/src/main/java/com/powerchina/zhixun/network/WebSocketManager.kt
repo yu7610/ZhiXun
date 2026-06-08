@@ -37,6 +37,10 @@ class WebSocketManager(private val context: Context) {
         private const val HELLO_TIMEOUT = 15000L // 延长握手超时到15秒
         private const val CONNECT_TIMEOUT = 15L // 连接超时15秒
         private const val WRITE_TIMEOUT = 15L // 写入超时15秒
+        private const val LOG_PAYLOAD_MAX = 512
+
+        private fun summarizePayload(text: String): String =
+            if (text.length <= LOG_PAYLOAD_MAX) text else text.take(LOG_PAYLOAD_MAX) + "…(${text.length}B)"
     }
 
     private val gson = Gson()
@@ -147,24 +151,24 @@ class WebSocketManager(private val context: Context) {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (isStale()) return
-                val msgType = try {
-                    gson.fromJson(text, JsonObject::class.java).get("type")?.asString
-                } catch (_: Exception) {
-                    null
-                }
-                val isMcp = msgType == "mcp"
-                if (!isMcp) {
-                    Log.d(TAG, "收到文本消息: $text")
-                }
-                Log.i(PhotoKeyLog.TAG, "服务端← ${msgType ?: "unknown"}: $text")
-                textMessageListeners.forEach { listener ->
-                    try {
-                        listener(text)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "文本消息监听器异常", e)
-                    }
-                }
                 scope.launch {
+                    val msgType = try {
+                        gson.fromJson(text, JsonObject::class.java).get("type")?.asString
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val isMcp = msgType == "mcp"
+                    if (!isMcp) {
+                        Log.d(TAG, "收到文本消息: ${summarizePayload(text)}")
+                    }
+                    Log.i(PhotoKeyLog.TAG, "服务端← ${msgType ?: "unknown"}: ${summarizePayload(text)}")
+                    textMessageListeners.forEach { listener ->
+                        try {
+                            listener(text)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "文本消息监听器异常", e)
+                        }
+                    }
                     handleTextMessage(text)
                     _events.emit(WebSocketEvent.TextMessage(text))
                 }
