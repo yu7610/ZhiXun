@@ -30,7 +30,6 @@ class DashcamRecordingController(
         currentFile = outputFile
         onFinalize = null
         val outputOptions = FileOutputOptions.Builder(outputFile).build()
-        // 录像不采集麦克风
         activeRecording = videoCapture.output
             .prepareRecording(context, outputOptions)
             .start(mainExecutor) { event ->

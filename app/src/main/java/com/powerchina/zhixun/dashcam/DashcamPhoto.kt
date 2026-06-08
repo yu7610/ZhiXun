@@ -2,15 +2,9 @@ package com.powerchina.zhixun.dashcam
 
 import java.io.File
 
-enum class DashcamClipType {
-    VIDEO,
-    AUDIO,
-}
-
-data class DashcamClip(
+data class DashcamPhoto(
     val file: File,
     val displayName: String,
     val sizeBytes: Long,
     val lastModifiedMs: Long,
-    val type: DashcamClipType,
 )

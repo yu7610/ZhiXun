@@ -2,13 +2,14 @@ package com.powerchina.zhixun.dashcam
 
 import android.Manifest
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Environment
 import android.os.StatFs
 import android.util.Log
-import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import androidx.camera.core.CameraSelector
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -49,6 +51,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -65,7 +69,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val BlueBackBtn = Color(0xFF3D7BDB)
 private val RecRed = Color(0xFFD32F2F)
@@ -85,15 +91,22 @@ fun DashcamScreen(
 ) {
     val context = LocalContext.current
     val isRecording by viewModel.isRecording.collectAsState()
+    val isAudioRecording by viewModel.isAudioRecording.collectAsState()
     val elapsedSeconds by viewModel.elapsedSeconds.collectAsState()
     val clips by viewModel.clips.collectAsState()
+    val photos by viewModel.photos.collectAsState()
+    val isPhotoUploading by viewModel.isPhotoUploading.collectAsState()
     val message by viewModel.message.collectAsState()
 
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var playingClip by remember { mutableStateOf<DashcamClip?>(null) }
+    var viewingPhoto by remember { mutableStateOf<DashcamPhoto?>(null) }
     var showPlaybackSheet by remember { mutableStateOf(false) }
+    var showPhotoSheet by remember { mutableStateOf(false) }
 
-    val permissionsState = rememberMultiplePermissionsState(listOf(Manifest.permission.CAMERA))
+    val permissionsState = rememberMultiplePermissionsState(
+        listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+    )
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val deviceId = remember { ConfigManager(context).loadConfig().macAddress.ifBlank { "未知设备" } }
@@ -129,7 +142,25 @@ fun DashcamScreen(
     }
 
     playingClip?.let { clip ->
-        DashcamVideoPlayerDialog(clip = clip, onDismiss = { playingClip = null })
+        when (clip.type) {
+            DashcamClipType.VIDEO -> DashcamVideoPlayerDialog(
+                clip = clip,
+                onDismiss = { playingClip = null },
+            )
+            DashcamClipType.AUDIO -> DashcamAudioPlayerDialog(
+                clip = clip,
+                onDismiss = { playingClip = null },
+            )
+        }
+    }
+
+    viewingPhoto?.let { photo ->
+        DashcamPhotoViewerDialog(
+            photo = photo,
+            isUploading = isPhotoUploading,
+            onUpload = { viewModel.uploadPhoto(photo) },
+            onDismiss = { viewingPhoto = null },
+        )
     }
 
     if (showPlaybackSheet) {
@@ -141,7 +172,22 @@ fun DashcamScreen(
                 if (clip.file.exists() && clip.file.length() > 0L) {
                     playingClip = clip
                 } else {
-                    scope.launch { snackbar.showSnackbar("录像文件不存在") }
+                    scope.launch { snackbar.showSnackbar("文件不存在") }
+                }
+            },
+        )
+    }
+
+    if (showPhotoSheet) {
+        PhotoGalleryBottomSheet(
+            photos = photos,
+            onDismiss = { showPhotoSheet = false },
+            onView = { photo ->
+                showPhotoSheet = false
+                if (photo.file.exists() && photo.file.length() > 0L) {
+                    viewingPhoto = photo
+                } else {
+                    scope.launch { snackbar.showSnackbar("文件不存在") }
                 }
             },
         )
@@ -202,12 +248,19 @@ fun DashcamScreen(
             ControlButtonPanel(
                 enabled = permissionsState.allPermissionsGranted,
                 isRecording = isRecording,
-                onAudio = {
-                    scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_feature_coming)) }
-                },
-                onPhoto = { VideoKeyHandler.requestServerPhoto(context) },
+                isAudioRecording = isAudioRecording,
+                onAudio = { viewModel.toggleAudioRecording() },
+                onPhoto = { viewModel.takePhoto() },
                 onRecordToggle = { viewModel.toggleRecording() },
-                onUpload = { VideoKeyHandler.requestServerPhoto(context) },
+                onUpload = {
+                    if (viewModel.hasPhotosAfterRefresh()) {
+                        showPhotoSheet = true
+                    } else {
+                        scope.launch {
+                            snackbar.showSnackbar(context.getString(R.string.dashcam_no_photos))
+                        }
+                    }
+                },
                 onPlayback = {
                     if (clips.isEmpty()) {
                         scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_no_clip_playback)) }
@@ -368,6 +421,7 @@ private fun StatusInfoBar(
 private fun ControlButtonPanel(
     enabled: Boolean,
     isRecording: Boolean,
+    isAudioRecording: Boolean,
     onAudio: () -> Unit,
     onPhoto: () -> Unit,
     onRecordToggle: () -> Unit,
@@ -387,8 +441,8 @@ private fun ControlButtonPanel(
         ) {
             DashcamActionButton(
                 text = stringResource(R.string.dashcam_btn_audio),
-                color = BtnPurple,
-                enabled = enabled,
+                color = if (isAudioRecording) RecRed else BtnPurple,
+                enabled = enabled && !isRecording,
                 modifier = Modifier.weight(1f),
                 onClick = onAudio,
             )
@@ -405,7 +459,7 @@ private fun ControlButtonPanel(
                     if (isRecording) R.string.dashcam_btn_stop else R.string.dashcam_btn_start,
                 ),
                 color = if (isRecording) RecRed else BtnStartGreen,
-                enabled = enabled,
+                enabled = enabled && !isAudioRecording,
                 modifier = Modifier.weight(1f),
                 onClick = onRecordToggle,
             )
@@ -455,6 +509,96 @@ private fun DashcamActionButton(
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PhotoGalleryBottomSheet(
+    photos: List<DashcamPhoto>,
+    onDismiss: () -> Unit,
+    onView: (DashcamPhoto) -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xFF1A1A1A),
+    ) {
+        Text(
+            text = stringResource(R.string.dashcam_saved_photos),
+            color = Color.White,
+            fontWeight = FontWeight.Bold,
+            fontSize = 16.sp,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+        )
+        LazyColumn(
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(photos, key = { it.file.absolutePath }) { photo ->
+                PhotoRow(photo = photo, onClick = { onView(photo) })
+            }
+        }
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun PhotoRow(photo: DashcamPhoto, onClick: () -> Unit) {
+    val time = remember(photo.lastModifiedMs) {
+        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(photo.lastModifiedMs))
+    }
+    var thumbnail by remember(photo.file.absolutePath) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    LaunchedEffect(photo.file.absolutePath) {
+        thumbnail = withContext(Dispatchers.IO) {
+            BitmapFactory.decodeFile(photo.file.absolutePath)?.asImageBitmap()
+        }
+    }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF2A2A2A)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF1A1A1A)),
+                contentAlignment = Alignment.Center,
+            ) {
+                thumbnail?.let { bitmap ->
+                    Image(
+                        bitmap = bitmap,
+                        contentDescription = photo.displayName,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(photo.displayName, color = Color.White, fontWeight = FontWeight.Medium)
+                Text(
+                    "${formatFileSize(photo.sizeBytes)} · $time",
+                    color = Color.White.copy(alpha = 0.65f),
+                    fontSize = 12.sp,
+                )
+            }
+            Text(
+                text = stringResource(R.string.dashcam_photo_view),
+                color = Color(0xFF90CAF9),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 
@@ -516,7 +660,18 @@ private fun ClipRow(clip: DashcamClip, onClick: () -> Unit) {
                     fontSize = 12.sp,
                 )
             }
-            Text("播放", color = Color(0xFF90CAF9), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Text(
+                text = stringResource(
+                    if (clip.type == DashcamClipType.AUDIO) {
+                        R.string.dashcam_clip_play_audio
+                    } else {
+                        R.string.dashcam_clip_play_video
+                    },
+                ),
+                color = Color(0xFF90CAF9),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
 }

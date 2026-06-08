@@ -122,6 +122,8 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.video)
     implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.media3.transformer)
+    implementation(libs.androidx.media3.effect)
     implementation(libs.baidu.map.sdk)
     implementation(libs.baidu.map.util)
     implementation(libs.baidu.location.sdk)

@@ -31,21 +31,59 @@ object DashcamRecordingStore {
         return File(recordingsDir(context), "REC_$stamp.mp4")
     }
 
+    fun createAudioOutputFile(context: Context): File {
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return File(recordingsDir(context), "AUD_$stamp.m4a")
+    }
+
+    fun createCompressTempFile(source: File): File =
+        File(source.parentFile, "${source.name}.compressing")
+
     fun createPhotoFile(context: Context): File {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         return File(recordingsDir(context), "IMG_$stamp.jpg")
     }
 
-    fun listClips(context: Context): List<DashcamClip> =
+    fun listPhotos(context: Context): List<DashcamPhoto> =
         recordingsDir(context)
-            .listFiles { file -> file.isFile && file.extension.equals("mp4", ignoreCase = true) }
+            .listFiles { file ->
+                file.isFile && (
+                    file.extension.equals("jpg", ignoreCase = true) ||
+                        file.extension.equals("jpeg", ignoreCase = true)
+                    )
+            }
             ?.sortedByDescending { it.lastModified() }
             ?.map { file ->
+                DashcamPhoto(
+                    file = file,
+                    displayName = file.name,
+                    sizeBytes = file.length(),
+                    lastModifiedMs = file.lastModified(),
+                )
+            }
+            .orEmpty()
+
+    fun listClips(context: Context): List<DashcamClip> =
+        recordingsDir(context)
+            .listFiles { file ->
+                file.isFile && (
+                    file.extension.equals("mp4", ignoreCase = true) ||
+                        file.extension.equals("m4a", ignoreCase = true)
+                    )
+            }
+            ?.sortedByDescending { it.lastModified() }
+            ?.map { file ->
+                val type = if (file.extension.equals("m4a", ignoreCase = true)) {
+                    DashcamClipType.AUDIO
+                } else {
+                    DashcamClipType.VIDEO
+                }
                 DashcamClip(
                     file = file,
                     displayName = file.name,
                     sizeBytes = file.length(),
                     lastModifiedMs = file.lastModified(),
+                    type = type,
                 )
             }
             .orEmpty()
