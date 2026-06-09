@@ -170,6 +170,20 @@ class XiaozhiSessionManager private constructor(
         _isConnecting.value = false
     }
 
+    /**
+     * 待机黑屏休眠：断开 WebSocket 并禁止自动重连，亮屏/唤醒后再 [ensureConnected]。
+     */
+    fun disconnectForStandbySleep() {
+        webSocketManager.disableReconnect()
+        webSocketManager.disconnect(
+            disableAutoReconnect = true,
+            clearCredentials = false,
+        )
+        _isConnected.value = false
+        _isConnecting.value = false
+        Log.i(TAG, "disconnectForStandbySleep: 已断开，等待亮屏重连")
+    }
+
     /** 应用关闭：断开 WebSocket 并禁止自动重连 */
     fun shutdown() {
         webSocketManager.disableReconnect()

@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.effect.Presentation
@@ -21,7 +22,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
 /**
- * 录屏结束后二次压缩：降分辨率 + H.264 转码，保留音轨，替换原文件。
+ * 录屏结束后二次压缩：降分辨率 + H.264 转码。
+ * 压缩片写入 sdcard0/DCIM/100MEDIA，校验通过后覆盖原片 yyyyMMddHHmmss-00N.MP4。
  */
 object DashcamVideoCompressor {
 
@@ -31,14 +33,26 @@ object DashcamVideoCompressor {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    suspend fun compressAndReplace(context: Context, source: File): Result<CompressResult> {
+    suspend fun compressToSdcard0(
+        context: Context,
+        source: File,
+        originalRecordingUri: Uri,
+    ): Result<CompressResult> {
         if (!source.exists() || source.length() == 0L) {
-            return Result.failure(IllegalStateException("源视频不存在或为空"))
+            return Result.failure(
+                IllegalStateException("源视频不存在或为空 path=${source.absolutePath}"),
+            )
         }
-        val tempOutput = DashcamRecordingStore.createCompressTempFile(source)
+        val tempOutput = File(
+            context.cacheDir,
+            "dashcam_compress_${System.currentTimeMillis()}.mp4",
+        )
         tempOutput.delete()
         val originalBytes = source.length()
-        Log.i(TAG, "开始压缩 ${source.name} size=${originalBytes}B → 高度≤${TARGET_HEIGHT_PX}p")
+        Log.i(
+            TAG,
+            "开始压缩 ${source.name} size=${originalBytes}B → 高度≤${TARGET_HEIGHT_PX}p → sdcard0",
+        )
 
         val transcode = transcodeToFile(context, source, tempOutput)
         if (transcode.isFailure) {
@@ -48,17 +62,26 @@ object DashcamVideoCompressor {
             )
         }
 
-        val compressedBytes = tempOutput.length()
-        if (compressedBytes <= 0L) {
+        val tempCompressedBytes = tempOutput.length()
+        if (tempCompressedBytes <= 0L) {
             tempOutput.delete()
             return Result.failure(IllegalStateException("压缩输出为空"))
         }
-        if (!source.delete()) {
-            tempOutput.delete()
-            return Result.failure(IllegalStateException("无法删除原视频"))
+
+        val saveResult = withContext(Dispatchers.IO) {
+            DashcamRecordingStore.saveCompressedVideoToSdcard0(
+                context = context,
+                compressedTemp = tempOutput,
+                displayName = source.name,
+                originalRecordingUri = originalRecordingUri,
+                originalSourceFile = source,
+            )
         }
-        if (!tempOutput.renameTo(source)) {
-            return Result.failure(IllegalStateException("无法替换为压缩文件"))
+        tempOutput.delete()
+        val sdcard0File = saveResult?.file
+        val compressedBytes = sdcard0File?.let { DashcamRecordingStore.fileSizeOnDevice(it) } ?: 0L
+        if (sdcard0File == null || compressedBytes == 0L) {
+            return Result.failure(IllegalStateException("压缩片写入 sdcard0 失败"))
         }
 
         val saved = originalBytes - compressedBytes
@@ -66,13 +89,16 @@ object DashcamVideoCompressor {
         Log.i(
             TAG,
             "压缩完成 ${source.name} ${originalBytes}B → ${compressedBytes}B " +
-                "节省${saved}B (${ratio}%)",
+                "节省${saved}B (${ratio}%) sdcard0=${sdcard0File.absolutePath} " +
+                "sameAlias=${saveResult.sameVolumeAlias}",
         )
         return Result.success(
             CompressResult(
-                file = source,
+                sourceFile = saveResult.emulatedFile,
+                sdcard0File = sdcard0File,
                 originalBytes = originalBytes,
                 compressedBytes = compressedBytes,
+                sameVolumeAlias = saveResult.sameVolumeAlias,
             ),
         )
     }
@@ -84,7 +110,8 @@ object DashcamVideoCompressor {
     ): Result<Unit> = withContext(Dispatchers.Main.immediate) {
         suspendCancellableCoroutine { cont ->
             val app = context.applicationContext
-            val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(source)))
+            val sourceUri = source.toUri()
+            val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(sourceUri))
                 .setEffects(
                     Effects(
                         emptyList(),
@@ -95,6 +122,7 @@ object DashcamVideoCompressor {
 
             val transformer = Transformer.Builder(app)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
+                .setAudioMimeType(MimeTypes.AUDIO_AAC)
                 .addListener(
                     object : Transformer.Listener {
                         override fun onCompleted(composition: Composition, result: ExportResult) {
@@ -106,7 +134,12 @@ object DashcamVideoCompressor {
                             result: ExportResult,
                             exception: ExportException,
                         ) {
-                            Log.e(TAG, "Transformer 失败", exception)
+                            Log.e(
+                                TAG,
+                                "Transformer 失败 source=${source.absolutePath} " +
+                                    "code=${exception.errorCode} msg=${exception.message}",
+                                exception,
+                            )
                             if (cont.isActive) cont.resume(Result.failure(exception))
                         }
                     },
@@ -125,7 +158,9 @@ object DashcamVideoCompressor {
 }
 
 data class CompressResult(
-    val file: File,
+    val sourceFile: File,
+    val sdcard0File: File,
     val originalBytes: Long,
     val compressedBytes: Long,
+    val sameVolumeAlias: Boolean,
 )

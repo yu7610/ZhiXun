@@ -142,6 +142,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     /** 待机时唤醒连接被服务端空闲关闭→快速重连的宽限窗口：UI 维持「待机」，不闪「连接中」 */
     private val _isStandbyReconnecting = MutableStateFlow(false)
     val isStandbyReconnecting: StateFlow<Boolean> = _isStandbyReconnecting.asStateFlow()
+
+    /** 待机黑屏休眠：已主动断连，亮屏后再重连；UI 仍显示「待机」并继续息屏计时 */
+    private val _isStandbyScreenSleep = MutableStateFlow(false)
+    val isStandbyScreenSleep: StateFlow<Boolean> = _isStandbyScreenSleep.asStateFlow()
     private var standbyReconnectGraceJob: Job? = null
 
     val isSessionConnecting: StateFlow<Boolean> = sessionManager.isConnecting
@@ -1808,6 +1812,92 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         scheduleStandbyReadyPoll()
     }
 
+    /** 待机黑屏（[ScreenOnHelper] 20s）：断开小智、释放相机，保留语音唤醒 */
+    fun onStandbyScreenSleep() {
+        if (_isStandbyScreenSleep.value) return
+        if (!isStandbySleepEligible()) {
+            Log.d(PhotoKeyLog.TAG, "跳过休眠断连：state=${_state.value} auto=$isAutoMode")
+            return
+        }
+        _isStandbyScreenSleep.value = true
+        standbyReconnectGraceJob?.cancel()
+        _isStandbyReconnecting.value = false
+        _isAwaitingReconnect.value = false
+
+        if (XiaozhiAppEvents.isPhotoSessionActive()) {
+            resetPhotoFlowToInitialStandby("standby_sleep")
+        } else {
+            XiaozhiMcpHandler.abortStuckCapture("standby_sleep")
+            XiaozhiMcpHandler.cancelTakePhotoFallback()
+            SharedCameraCapture.forceReset()
+        }
+
+        if (_isConnected.value || sessionManager.isConnecting.value) {
+            sessionManager.disconnectForStandbySleep()
+        } else {
+            sessionManager.webSocketManager.disableReconnect()
+        }
+        _isConnected.value = false
+
+        prepareStandbyWakeListening()
+        Log.i(TAG, "待机休眠：已断连并释放相机，唤醒服务保持运行")
+        VoiceFlowLog.snapshot("standby.sleep", "disconnect ws, camera reset, wake kept")
+        updateStandbyReady()
+    }
+
+    /** 亮屏/触摸恢复亮度后重新连接小智 */
+    fun onStandbyScreenWake(fromSleep: Boolean) {
+        if (!_isStandbyScreenSleep.value) return
+        Log.i(TAG, "亮屏恢复：重新连接小智 fromSleep=$fromSleep")
+        VoiceFlowLog.snapshot("standby.wake", "reconnect fromSleep=$fromSleep")
+        beginStandbySleepReconnect()
+    }
+
+    private fun isStandbySleepEligible(): Boolean {
+        if (!conversationUiActive) return false
+        if (isAutoMode || pendingVoiceWake || pendingSessionEnd) return false
+        if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) return false
+        return when (_state.value) {
+            ConversationState.IDLE -> true
+            ConversationState.CONNECTING ->
+                _isStandbyReconnecting.value ||
+                    _isSessionEndStandby.value ||
+                    _isAwaitingReconnect.value
+            else -> false
+        }
+    }
+
+    private fun beginStandbySleepReconnect() {
+        standbyReconnectGraceJob?.cancel()
+        _isAwaitingReconnect.value = true
+        _isStandbyReconnecting.value = true
+        sessionManager.ensureConnected()
+        scheduleStandbyReconnectGrace()
+        updateStandbyReady()
+        scheduleStandbyReadyPoll()
+    }
+
+    private fun scheduleStandbyReconnectGrace() {
+        standbyReconnectGraceJob?.cancel()
+        standbyReconnectGraceJob = viewModelScope.launch {
+            delay(STANDBY_RECONNECT_GRACE_MS)
+            if (!_isConnected.value) {
+                _isStandbyReconnecting.value = false
+                _isStandbyReady.value = false
+                if (_state.value == ConversationState.IDLE) {
+                    transitionState(ConversationState.CONNECTING, "standby_wake_reconnect_slow")
+                }
+                updateStandbyReady()
+            }
+        }
+    }
+
+    private fun clearStandbyScreenSleep(reason: String) {
+        if (!_isStandbyScreenSleep.value) return
+        _isStandbyScreenSleep.value = false
+        Log.d(TAG, "清除待机休眠标记 reason=$reason")
+    }
+
     private fun cancelSessionEndFallback() {
         sessionEndFallbackJob?.cancel()
         sessionEndFallbackJob = null
@@ -2373,6 +2463,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 _errorMessage.value = null
                 standbyReconnectGraceJob?.cancel()
                 _isStandbyReconnecting.value = false
+                clearStandbyScreenSleep("ws_connected")
                 if (_state.value == ConversationState.CONNECTING) {
                     _state.value = ConversationState.IDLE
                 }
@@ -2428,6 +2519,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     Log.i(TAG, "服务器断线，等待结束语播完再待机")
                 } else if (shouldReconnectAfterConversationDisconnect()) {
                     beginWsReconnectAfterConversationDisconnect()
+                } else if (_isStandbyScreenSleep.value) {
+                    Log.i(TAG, "待机休眠断连，保留唤醒，等待亮屏重连")
+                    prepareStandbyWakeListening()
+                    updateStandbyReady()
                 } else if (_state.value == ConversationState.IDLE &&
                     webSocketManager.isAutoReconnectEnabled()
                 ) {
@@ -2437,18 +2532,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     // 宽限期内 UI 维持「待机」（不切 CONNECTING、不闪「连接中」）；
                     // 超过宽限仍未连上，才显示「连接中」。
                     _isStandbyReconnecting.value = true
-                    standbyReconnectGraceJob?.cancel()
-                    standbyReconnectGraceJob = viewModelScope.launch {
-                        delay(STANDBY_RECONNECT_GRACE_MS)
-                        if (!_isConnected.value) {
-                            _isStandbyReconnecting.value = false
-                            _isStandbyReady.value = false
-                            if (_state.value == ConversationState.IDLE) {
-                                transitionState(ConversationState.CONNECTING, "ws_disconnect_reconnect_slow")
-                            }
-                            updateStandbyReady()
-                        }
-                    }
+                    scheduleStandbyReconnectGrace()
                     Log.i(TAG, "WS 断开 → 待机快速重连宽限中（UI 维持待机）")
                     VoiceFlowLog.warn(
                         "ws.disconnected",

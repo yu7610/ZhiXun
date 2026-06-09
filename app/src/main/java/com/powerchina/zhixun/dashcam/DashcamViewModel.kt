@@ -7,7 +7,6 @@ import androidx.lifecycle.viewModelScope
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.xiaozhi.XiaozhiPhotoUploader
 import java.io.File
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +24,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private val app = application.applicationContext
 
     private companion object {
+        private const val TAG = "DashcamVM"
         private const val FRAME_UPLOAD_INTERVAL_MS = 5_000L
     }
 
@@ -62,6 +62,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private var compressJob: Job? = null
     private val frameCaptureInProgress = AtomicBoolean(false)
     private val photoCaptureInProgress = AtomicBoolean(false)
+    private val recordingStartInProgress = AtomicBoolean(false)
     private var hasAutoStarted = false
     private var userStoppedRecording = false
 
@@ -75,6 +76,13 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         SharedCameraCapture.dashcamSession = session
         if (session != null) {
             McpCameraHolder.pauseForDashcam()
+            if (_isRecording.value && !session.recordingController.isRecording) {
+                Log.w(TAG, "相机重绑导致录像中断，重置状态")
+                _isRecording.value = false
+                recordingStartInProgress.set(false)
+                stopTimer()
+                stopFrameUploadLoop()
+            }
             tryAutoStartRecording()
         }
     }
@@ -88,14 +96,10 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
 
     fun tryAutoStartRecording() {
         val controller = recordingController ?: return
-        if (userStoppedRecording || _isRecording.value || _isAudioRecording.value) return
+        if (userStoppedRecording || _isAudioRecording.value) return
+        if (_isRecording.value || controller.isRecording || recordingStartInProgress.get()) return
         if (!hasAutoStarted) hasAutoStarted = true
         startRecording(controller)
-    }
-
-    fun ensureRecordingContinues() {
-        if (userStoppedRecording || _isRecording.value || _isAudioRecording.value) return
-        tryAutoStartRecording()
     }
 
     fun refreshClips() {
@@ -140,12 +144,12 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 val speakText = RecordingFrameUploader.parseSpeakText(raw)
                 if (speakText != null) {
                     RecordingFrameTts.speak(getApplication(), speakText)
-                    _message.value = "上传成功：$speakText"
+                    showMessage("上传成功：$speakText")
                 } else {
-                    _message.value = "上传成功"
+                    showMessage("上传成功")
                 }
             }.onFailure {
-                _message.value = it.message ?: "上传失败"
+                showMessage(it.message ?: "上传失败")
             }
         }
     }
@@ -153,11 +157,11 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     fun takePhoto() {
         val session = cameraSession
         if (session == null) {
-            _message.value = "相机未就绪"
+            showMessage("相机未就绪")
             return
         }
         if (!photoCaptureInProgress.compareAndSet(false, true)) {
-            _message.value = "拍照进行中，请稍候"
+            showMessage("拍照进行中，请稍候")
             return
         }
         val file = DashcamRecordingStore.createPhotoFile(app)
@@ -165,10 +169,10 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             photoCaptureInProgress.set(false)
             result.onSuccess { saved ->
                 refreshPhotos()
-                _message.value = "照片已保存：${saved.name}"
+                showMessage("照片已保存：${saved.name}")
             }.onFailure {
                 file.delete()
-                _message.value = it.message ?: "拍照失败"
+                showMessage(it.message ?: "拍照失败")
             }
         }
     }
@@ -177,9 +181,14 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         _message.value = null
     }
 
+    private fun showMessage(text: String) {
+        Log.i(TAG, "toast: $text")
+        _message.value = text
+    }
+
     fun toggleAudioRecording() {
         if (_isRecording.value) {
-            _message.value = "请先停止录像"
+            showMessage("请先停止录像")
             return
         }
         if (_isAudioRecording.value) {
@@ -193,7 +202,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             _isAudioRecording.value = true
         }.onFailure {
             file.delete()
-            _message.value = it.message ?: "录音失败"
+            showMessage(it.message ?: "录音失败")
         }
     }
 
@@ -202,20 +211,20 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         _isAudioRecording.value = false
         result.onSuccess { file ->
             refreshClips()
-            _message.value = "录音已保存：${file.name}"
+            showMessage("录音已保存：${file.name}")
         }.onFailure {
-            _message.value = it.message ?: "录音保存失败"
+            showMessage(it.message ?: "录音保存失败")
         }
     }
 
     fun toggleRecording() {
         if (_isAudioRecording.value) {
-            _message.value = "请先停止录音"
+            showMessage("请先停止录音")
             return
         }
         val controller = recordingController
         if (controller == null) {
-            _message.value = "相机未就绪"
+            showMessage("相机未就绪")
             return
         }
         if (_isRecording.value) {
@@ -231,7 +240,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     fun onVideoKey(action: DashcamVideoKeyEvents.KeyAction) {
         if (action != DashcamVideoKeyEvents.KeyAction.RECORD) return
         if (_isAudioRecording.value) {
-            _message.value = "请先停止录音"
+            showMessage("请先停止录音")
             return
         }
         Log.i(
@@ -249,7 +258,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             val controller = recordingController
             if (controller == null) {
                 Log.w(VideoKeyReceiver.TAG, "长按失败: 相机未就绪")
-                _message.value = "相机未就绪"
+                showMessage("相机未就绪")
             } else {
                 startRecording(controller)
             }
@@ -258,25 +267,40 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
 
     private fun startRecording(controller: DashcamRecordingController) {
         if (_isAudioRecording.value) {
-            _message.value = "请先停止录音"
+            showMessage("请先停止录音")
             return
         }
-        val file = DashcamRecordingStore.createOutputFile(app)
-        controller.startRecording(
-            outputFile = file,
+        if (controller.isRecording || _isRecording.value) return
+        if (!recordingStartInProgress.compareAndSet(false, true)) return
+        val request = runCatching {
+            DashcamRecordingStore.createVideoOutputRequest(app)
+        }.getOrElse { err ->
+            recordingStartInProgress.set(false)
+            Log.e(TAG, "创建录像输出失败", err)
+            showMessage(err.message ?: "无法创建录像文件")
+            return
+        }
+        val started = controller.startRecording(
+            request = request,
             onStarted = {
+                recordingStartInProgress.set(false)
                 _isRecording.value = true
                 _elapsedSeconds.value = 0
                 startTimer()
                 startFrameUploadLoop()
             },
             onError = { err ->
+                recordingStartInProgress.set(false)
                 _isRecording.value = false
                 stopTimer()
                 stopFrameUploadLoop()
-                _message.value = err
+                showMessage("录像失败: $err")
             },
         )
+        if (!started) {
+            recordingStartInProgress.set(false)
+            showMessage("录像未启动：${request.displayName}")
+        }
     }
 
     private fun stopRecording() {
@@ -285,13 +309,17 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             _isRecording.value = false
             stopTimer()
             stopFrameUploadLoop()
-            result.onSuccess { file ->
-                refreshClips()
-                _message.value = "已保存：${file.name}，正在压缩…"
-                scheduleCompressRecording(file)
+            result.onSuccess { output ->
+                viewModelScope.launch {
+                    withContext(Dispatchers.IO) {
+                        DashcamRecordingStore.publishVideoOutput(app, output)
+                    }
+                    refreshClips()
+                    scheduleCompressRecording(output)
+                }
             }.onFailure {
                 refreshClips()
-                _message.value = it.message ?: "录像已停止"
+                showMessage("录像停止失败: ${it.message ?: "未知错误"}")
             }
         }
     }
@@ -330,38 +358,45 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         frameUploadJob = null
     }
 
-    private fun scheduleCompressRecording(file: File) {
+    private fun scheduleCompressRecording(output: DashcamVideoOutput) {
         compressJob?.cancel()
         compressJob = viewModelScope.launch {
-            _isCompressing.value = true
-            val result = withContext(Dispatchers.Default) {
-                DashcamVideoCompressor.compressAndReplace(app, file)
+            val ready = withContext(Dispatchers.IO) {
+                DashcamRecordingStore.waitForVideoReady(app, output)
             }
+            if (ready.isFailure) {
+                Log.w(TAG, "录像未落盘 ${output.displayName}: ${ready.exceptionOrNull()?.message}")
+                return@launch
+            }
+            val file = DashcamRecordingStore.resolveVideoFile(app, output)
+            if (file == null || !file.exists() || file.length() == 0L) {
+                refreshClips()
+                val report = DashcamRecordingStore.buildVideoPublishReport(
+                    app,
+                    output,
+                    readyBytes = ready.getOrNull(),
+                )
+                Log.w(TAG, "路径不可解析 ${output.displayName} | $report")
+                return@launch
+            }
+            _isCompressing.value = true
+            val result = DashcamVideoCompressor.compressToSdcard0(app, file, output.uri)
             _isCompressing.value = false
             refreshClips()
-            val finalFile = result.getOrNull()?.file ?: file
-            val gallerySaved = exportRecordingToGallery(finalFile)
-            val galleryHint = if (gallerySaved) "，已保存到相册" else "（相册保存失败）"
             result.onSuccess { compressed ->
-                _message.value = "压缩完成：${compressed.file.name} " +
-                    "(${formatSizeMb(compressed.originalBytes)} → " +
-                    "${formatSizeMb(compressed.compressedBytes)})$galleryHint"
+                exportRecordingToGallery(compressed.sdcard0File)
+                showMessage("保存成功")
             }.onFailure { err ->
                 Log.w(DashcamVideoCompressor.TAG, "压缩失败，保留原片: ${file.name}", err)
-                _message.value = "已保存：${finalFile.name}（压缩失败，保留原片）$galleryHint"
+                exportRecordingToGallery(file)
             }
         }
     }
 
-    private suspend fun exportRecordingToGallery(file: File): Boolean =
+    private suspend fun exportRecordingToGallery(file: File): File? =
         withContext(Dispatchers.IO) {
-            DashcamGalleryExporter.exportToGallery(app, file).isSuccess
+            DashcamGalleryExporter.exportToGallery(app, file).getOrNull()
         }
-
-    private fun formatSizeMb(bytes: Long): String {
-        val mb = bytes / (1024.0 * 1024.0)
-        return String.format(Locale.US, "%.1fMB", mb)
-    }
 
     private suspend fun captureAndUploadFrame() {
         val session = cameraSession

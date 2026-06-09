@@ -105,7 +105,15 @@ fun DashcamScreen(
     var showPhotoSheet by remember { mutableStateOf(false) }
 
     val permissionsState = rememberMultiplePermissionsState(
-        listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO),
+        permissions = buildList {
+            add(Manifest.permission.CAMERA)
+            add(Manifest.permission.RECORD_AUDIO)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.READ_MEDIA_VIDEO)
+            } else {
+                add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        },
     )
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -116,6 +124,7 @@ fun DashcamScreen(
 
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
+        Log.i("DashcamUI", "toast: $text")
         snackbar.showSnackbar(text)
         viewModel.clearMessage()
     }
@@ -207,7 +216,6 @@ fun DashcamScreen(
                         modifier = Modifier.fillMaxSize(),
                         onSessionReady = { session ->
                             viewModel.bindCameraSession(session)
-                            viewModel.ensureRecordingContinues()
                         },
                     )
                     DashcamTopBar(
@@ -714,7 +722,7 @@ private fun rememberClockText(): String {
 private fun rememberStorageInfo(context: Context): Pair<String, String> {
     return remember {
         runCatching {
-            val dir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir
+            val dir = DashcamRecordingStore.publicVideoStorageDir()
             val stat = StatFs(dir.absolutePath)
             val total = stat.totalBytes
             val avail = stat.availableBytes

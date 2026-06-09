@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <external-files-path name="dashcam_movies" path="Movies/dashcam/" />
+    <external-path name="dcim_100media" path="DCIM/100MEDIA/" />
+    <root-path name="sdcard0_100media" path="storage/sdcard0/DCIM/100MEDIA/" />
 </paths>

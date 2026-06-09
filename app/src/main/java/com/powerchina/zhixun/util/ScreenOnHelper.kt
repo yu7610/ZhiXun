@@ -31,6 +31,21 @@ object ScreenOnHelper {
     private var standbyPhase = StandbyPhase.NORMAL
     private var savedWindowBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
 
+    /** 待机黑屏休眠 / 亮屏恢复时通知业务层（断连、重连小智等） */
+    interface StandbyScreenListener {
+        /** 待机 [STANDBY_OFF_MS] 黑屏，允许系统息屏 */
+        fun onStandbyScreenSleep()
+        /** 用户交互恢复亮度（从变暗/黑屏恢复） */
+        fun onStandbyScreenWake(fromSleep: Boolean)
+    }
+
+    @Volatile
+    private var standbyScreenListener: StandbyScreenListener? = null
+
+    fun setStandbyScreenListener(listener: StandbyScreenListener?) {
+        standbyScreenListener = listener
+    }
+
     fun attach(activity: Activity) {
         detach(activity, clearFlag = false)
         attachedActivity = WeakReference(activity)
@@ -44,8 +59,10 @@ object ScreenOnHelper {
         if (current != activity) return
         if (inStandbyMode) {
             if (standbyPhase != StandbyPhase.NORMAL) {
+                val fromSleep = standbyPhase == StandbyPhase.OFF
                 restoreStandbyBrightness(activity)
-                Log.d(TAG, "待机交互，恢复亮度")
+                standbyScreenListener?.onStandbyScreenWake(fromSleep)
+                Log.d(TAG, "待机交互，恢复亮度 fromSleep=$fromSleep")
             }
             keepScreenOn(activity)
             resetStandbyTimers(activity)
@@ -146,6 +163,7 @@ object ScreenOnHelper {
         activity.window.attributes = lp
         standbyPhase = StandbyPhase.OFF
         Log.i(TAG, "待机 ${STANDBY_OFF_MS / 1000}s → 屏幕黑屏")
+        standbyScreenListener?.onStandbyScreenSleep()
     }
 
     private fun restoreStandbyBrightness(activity: Activity) {

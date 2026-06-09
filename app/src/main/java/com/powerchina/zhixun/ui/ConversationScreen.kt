@@ -147,6 +147,7 @@ fun ConversationScreen(
     val isWakeHandoffActive by viewModel.isWakeHandoffActive.collectAsState()
     val isSessionEndStandby by viewModel.isSessionEndStandby.collectAsState()
     val isStandbyReconnecting by viewModel.isStandbyReconnecting.collectAsState()
+    val isStandbyScreenSleep by viewModel.isStandbyScreenSleep.collectAsState()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -176,18 +177,31 @@ fun ConversationScreen(
     val isStandbyDisplay = isStandbyUiDisplayed(
         state = conversationState,
         isStandbyReady = isStandbyReady,
+        isStandbyScreenSleep = isStandbyScreenSleep,
         isSessionEndStandby = isSessionEndStandby,
         isStandbyReconnecting = isStandbyReconnecting,
         isWakeGreetingPlaying = isWakeGreetingPlaying,
         isWakeHandoffActive = isWakeHandoffActive,
     )
     val activity = remember(view) { view.context as? Activity }
+    DisposableEffect(viewModel, activity) {
+        val listener = object : ScreenOnHelper.StandbyScreenListener {
+            override fun onStandbyScreenSleep() = viewModel.onStandbyScreenSleep()
+            override fun onStandbyScreenWake(fromSleep: Boolean) =
+                viewModel.onStandbyScreenWake(fromSleep)
+        }
+        ScreenOnHelper.setStandbyScreenListener(listener)
+        onDispose {
+            ScreenOnHelper.setStandbyScreenListener(null)
+        }
+    }
     LaunchedEffect(isStandbyDisplay) {
         val host = activity ?: return@LaunchedEffect
         if (isStandbyDisplay) {
             ScreenOnHelper.enterStandbyMode(host)
         } else {
             ScreenOnHelper.exitStandbyMode(host)
+            viewModel.onStandbyScreenWake(fromSleep = true)
         }
     }
     DisposableEffect(Unit) {
@@ -207,6 +221,7 @@ fun ConversationScreen(
         isWakeHandoffActive = isWakeHandoffActive,
         isSessionEndStandby = isSessionEndStandby,
         isStandbyReconnecting = isStandbyReconnecting,
+        isStandbyScreenSleep = isStandbyScreenSleep,
         onShowSettings = onNavigateToSettings,
         onBack = onBack,
         showActivationDialog = showActivationDialog,
@@ -228,6 +243,7 @@ private fun MainConversationContent(
     isWakeHandoffActive: Boolean,
     isSessionEndStandby: Boolean,
     isStandbyReconnecting: Boolean,
+    isStandbyScreenSleep: Boolean,
     onShowSettings: () -> Unit,
     onBack: (() -> Unit)?,
     showActivationDialog: Boolean,
@@ -277,6 +293,7 @@ private fun MainConversationContent(
                 isWakeHandoffActive = isWakeHandoffActive,
                 isSessionEndStandby = isSessionEndStandby,
                 isStandbyReconnecting = isStandbyReconnecting,
+                isStandbyScreenSleep = isStandbyScreenSleep,
                 onShowSettings = onShowSettings,
                 onLocationClick = onOpenLocation,
                 onOpenDashcam = onOpenDashcam,
@@ -369,6 +386,7 @@ private fun TopBar(
     isWakeHandoffActive: Boolean,
     isSessionEndStandby: Boolean,
     isStandbyReconnecting: Boolean,
+    isStandbyScreenSleep: Boolean,
     onShowSettings: () -> Unit,
     onLocationClick: () -> Unit,
     onOpenDashcam: () -> Unit,
@@ -384,6 +402,7 @@ private fun TopBar(
         isWakeHandoffActive = isWakeHandoffActive,
         isSessionEndStandby = isSessionEndStandby,
         isStandbyReconnecting = isStandbyReconnecting,
+        isStandbyScreenSleep = isStandbyScreenSleep,
     )
 
     Box(
@@ -451,6 +470,7 @@ private fun TopBar(
 private fun isStandbyUiDisplayed(
     state: ConversationState,
     isStandbyReady: Boolean,
+    isStandbyScreenSleep: Boolean,
     isSessionEndStandby: Boolean,
     isStandbyReconnecting: Boolean,
     isWakeGreetingPlaying: Boolean,
@@ -460,7 +480,7 @@ private fun isStandbyUiDisplayed(
     if (isSessionEndStandby || isStandbyReconnecting) {
         return state == ConversationState.IDLE || state == ConversationState.CONNECTING
     }
-    return state == ConversationState.IDLE && isStandbyReady
+    return state == ConversationState.IDLE && (isStandbyReady || isStandbyScreenSleep)
 }
 
 @Composable
@@ -474,9 +494,10 @@ private fun statusLabel(
     isWakeHandoffActive: Boolean,
     isSessionEndStandby: Boolean,
     isStandbyReconnecting: Boolean,
+    isStandbyScreenSleep: Boolean,
 ): String {
-    // 「退下」收尾、或待机快速重连窗口：待机/连接中态直接显示「待机」，不露出「连接中」
-    if ((isSessionEndStandby || isStandbyReconnecting) &&
+    // 「退下」收尾、待机快速重连、黑屏休眠：待机/连接中态直接显示「待机」，不露出「连接中」
+    if ((isSessionEndStandby || isStandbyReconnecting || isStandbyScreenSleep) &&
         (state == ConversationState.IDLE || state == ConversationState.CONNECTING)
     ) {
         return stringResource(R.string.status_standby)
@@ -496,7 +517,7 @@ private fun statusLabel(
         ConversationState.PROCESSING -> stringResource(R.string.status_processing)
         ConversationState.SPEAKING -> stringResource(R.string.status_speaking)
         ConversationState.CONNECTING -> stringResource(R.string.status_connecting)
-        ConversationState.IDLE -> if (isStandbyReady) {
+        ConversationState.IDLE -> if (isStandbyReady || isStandbyScreenSleep) {
             stringResource(R.string.status_standby)
         } else {
             stringResource(R.string.status_connecting)

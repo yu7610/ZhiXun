@@ -34,8 +34,8 @@ fun DashcamVideoPlayerDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    val uri = remember(clip.file.absolutePath) {
-        DashcamRecordingStore.uriForFile(context, clip.file)
+    val uri = remember(clip.uri, clip.file.absolutePath) {
+        DashcamRecordingStore.uriForClip(context, clip)
     }
 
     Dialog(
