@@ -29,7 +29,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
@@ -67,8 +66,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.zIndex
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
@@ -98,11 +95,10 @@ import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import java.io.File
 import kotlinx.coroutines.launch
 
-private val AuraBgTop = Color(0xFFF8F9FF)
-private val AuraBgBottom = Color(0xFFFBF5FF)
-private val AuraPrimary = Color(0xFF674BB5)
-private val AuraSecondary = Color(0xFF64A8FE)
-private val AuraTertiary = Color(0xFFF170B4)
+private val ChatBg = Color(0xFFB8DFF5)
+private val UserBubbleGreen = Color(0xFF95EC69)
+private val ChatText = Color(0xFF000000)
+private val AuraPrimary = Color(0xFF2E6B9E)
 private val AuraText = Color(0xFF121C2A)
 private val AuraSubText = Color(0xFF6E6A78)
 
@@ -301,35 +297,19 @@ private fun MainConversationContent(
             )
         },
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(AuraBgTop, AuraBgBottom),
-                    ),
-                )
-                .padding(padding),
+                .background(ChatBg)
+                .padding(padding)
+                .padding(horizontal = 16.dp),
         ) {
-            AuroraDecor(
+            MessageList(
+                messages = messages,
                 modifier = Modifier
-                    .matchParentSize()
-                    .zIndex(0f),
+                    .weight(1f)
+                    .fillMaxWidth(),
             )
-
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .zIndex(1f)
-                    .padding(horizontal = 24.dp),
-            ) {
-                MessageList(
-                    messages = messages,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                )
-            }
         }
     }
 
@@ -525,43 +505,6 @@ private fun statusLabel(
     }
 }
 
-@Composable
-private fun AuroraDecor(modifier: Modifier = Modifier) {
-    Box(modifier = modifier) {
-        Box(
-            modifier = Modifier
-                .size(420.dp)
-                .align(Alignment.TopCenter)
-                .background(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            AuraPrimary.copy(alpha = 0.16f),
-                            AuraSecondary.copy(alpha = 0.10f),
-                            Color.Transparent
-                        )
-                    ),
-                    shape = CircleShape
-                )
-        )
-
-        Box(
-            modifier = Modifier
-                .size(540.dp)
-                .align(Alignment.Center)
-                .background(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            AuraPrimary.copy(alpha = 0.14f),
-                            AuraTertiary.copy(alpha = 0.09f),
-                            Color.Transparent
-                        )
-                    ),
-                    shape = CircleShape
-                )
-        )
-    }
-}
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageList(
@@ -584,8 +527,8 @@ private fun MessageList(
         LazyColumn(
             state = listState,
             modifier = modifier,
-            contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            contentPadding = PaddingValues(top = 12.dp, bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(messages, key = { it.id }) { message ->
                 ChatBubble(message = message)
@@ -598,18 +541,8 @@ private fun MessageList(
 private fun ChatBubble(message: Message) {
     val isUser = message.role == MessageRole.USER
     val alignment = if (isUser) Alignment.End else Alignment.Start
-    val backgroundColor = if (isUser) AuraPrimary else Color.White
-    val contentColor = if (isUser) Color.White else AuraText
-    val textShape = if (isUser) {
-        RoundedCornerShape(20.dp, 4.dp, 20.dp, 20.dp)
-    } else {
-        RoundedCornerShape(4.dp, 20.dp, 20.dp, 20.dp)
-    }
-    val imageShape = if (isUser) {
-        RoundedCornerShape(16.dp, 4.dp, 16.dp, 16.dp)
-    } else {
-        RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp)
-    }
+    val bubbleShape = RoundedCornerShape(10.dp)
+    val imageShape = RoundedCornerShape(10.dp)
     var imageBitmap by remember(message.id, message.imagePath) {
         mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
     }
@@ -635,36 +568,40 @@ private fun ChatBubble(message: Message) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         imageBitmap?.let { bitmap ->
-            Surface(
-                color = Color.White,
-                shape = imageShape,
-                shadowElevation = 2.dp,
-                modifier = Modifier.widthIn(max = 220.dp),
-            ) {
-                Image(
-                    bitmap = bitmap,
-                    contentDescription = "照片",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(4f / 3f)
-                        .clip(imageShape),
-                    contentScale = ContentScale.Crop,
-                )
-            }
+            Image(
+                bitmap = bitmap,
+                contentDescription = "照片",
+                modifier = Modifier
+                    .widthIn(max = 220.dp)
+                    .aspectRatio(4f / 3f)
+                    .clip(imageShape),
+                contentScale = ContentScale.Crop,
+            )
         }
         if (message.content.isNotBlank()) {
-            Surface(
-                color = backgroundColor,
-                shape = textShape,
-                shadowElevation = 2.dp,
-                modifier = Modifier.widthIn(max = 280.dp),
-            ) {
+            if (isUser) {
+                Surface(
+                    color = UserBubbleGreen,
+                    shape = bubbleShape,
+                    modifier = Modifier.widthIn(max = 280.dp),
+                ) {
+                    Text(
+                        text = message.content,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        color = ChatText,
+                        fontSize = 16.sp,
+                        lineHeight = 24.sp,
+                    )
+                }
+            } else {
                 Text(
                     text = message.content,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    color = contentColor,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp,
+                    modifier = Modifier
+                        .widthIn(max = 300.dp)
+                        .padding(vertical = 4.dp),
+                    color = ChatText,
+                    fontSize = 16.sp,
+                    lineHeight = 24.sp,
                 )
             }
         }
