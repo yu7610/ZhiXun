@@ -11,8 +11,10 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
+import com.powerchina.zhixun.physicalkey.PhysicalKeyLifecycle
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -23,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object McpCameraHolder {
 
     private const val TAG = PhotoKeyLog.TAG
-    private const val CAPTURE_DELAY_MS = 50L
+    private const val CAPTURE_DELAY_MS = 300L
     private const val CAPTURE_READY_RETRY_MS = 120L
     private const val CAPTURE_TIMEOUT_MS = 12_000L
     private const val BIND_TIMEOUT_MS = 8_000L
@@ -132,6 +134,7 @@ object McpCameraHolder {
             val mainExecutor = ContextCompat.getMainExecutor(appContext)
             val file = DashcamRecordingStore.createPhotoFile(appContext)
             val options = ImageCapture.OutputFileOptions.Builder(file).build()
+            val silencer = SilentImageCapture.muteForCapture(appContext)
             val timeoutToken = scheduleCaptureTimeout(generation, finish)
             mainHandler.postDelayed({
                 if (generation != captureGeneration) return@postDelayed
@@ -140,6 +143,7 @@ object McpCameraHolder {
                     mainExecutor,
                     object : ImageCapture.OnImageSavedCallback {
                         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                            silencer.restore()
                             if (generation != captureGeneration) return
                             if (timeoutToken != captureTimeoutToken) return
                             cancelCaptureTimeout()
@@ -148,6 +152,7 @@ object McpCameraHolder {
                         }
 
                         override fun onError(exception: ImageCaptureException) {
+                            silencer.restore()
                             if (generation != captureGeneration) return
                             cancelCaptureTimeout()
                             Log.e(TAG, "拍照失败", exception)
@@ -233,22 +238,21 @@ object McpCameraHolder {
                     return@synchronized
                 }
             }
-            if (SharedCameraCapture.dashcamSession != null) {
-                Log.d(TAG, "执法仪占用相机，跳过 MCP 绑定")
+            if (DashcamForeground.isActive && SharedCameraCapture.dashcamSession != null) {
+                Log.d(TAG, "执法仪前台占用相机，跳过 MCP 绑定")
             } else {
                 val cameraProvider = providerFuture.get(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                val lifecycleOwner = resolveBindLifecycleOwner()
                 val latch = CountDownLatch(1)
                 var bindError: Exception? = null
                 mainHandler.post {
                     try {
                         synchronized(lock) {
                             resetBindingLocked()
-                            val capture = ImageCapture.Builder()
-                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                                .build()
+                            val capture = SilentImageCapture.build()
                             cameraProvider.unbindAll()
                             cameraProvider.bindToLifecycle(
-                                ProcessLifecycleOwner.get(),
+                                lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
                                 capture,
                             )
@@ -320,5 +324,13 @@ object McpCameraHolder {
             context,
             Manifest.permission.CAMERA,
         ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun resolveBindLifecycleOwner(): LifecycleOwner {
+        val activity = PhysicalKeyLifecycle.resumedActivity
+        if (activity is LifecycleOwner) {
+            return activity
+        }
+        return ProcessLifecycleOwner.get()
     }
 }

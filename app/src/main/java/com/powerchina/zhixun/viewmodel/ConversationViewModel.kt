@@ -16,6 +16,7 @@ import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.data.Message
 import com.powerchina.zhixun.data.MessageRole
 import com.powerchina.zhixun.data.XiaozhiConfig
+import com.powerchina.zhixun.dashcam.QuickPhotoCapture
 import com.powerchina.zhixun.dashcam.SharedCameraCapture
 import com.powerchina.zhixun.network.WebSocketEvent
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
@@ -1353,6 +1354,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    private fun prepareCameraForPhotoSession() {
+        SharedCameraCapture.dashcamSession = null
+        SharedCameraCapture.forceReset()
+        QuickPhotoCapture.preWarm(getApplication())
+        Log.d(PhotoKeyLog.TAG, "拍照会话：已预热 MCP 相机")
+    }
+
     private fun sendPhotoWakeFromStandby() {
         if (pendingSessionEnd || pendingVoiceWake || isWakeHandoffInProgress()) {
             Log.d(PhotoKeyLog.TAG, "待机拍照：交接/结束语中，忽略")
@@ -1380,7 +1388,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             schedulePhotoKeyRetry()
             return
         }
-        SharedCameraCapture.forceReset()
+        prepareCameraForPhotoSession()
         pauseWakeListening()
         pendingAutoStart = false
         isAutoMode = true
@@ -1407,7 +1415,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             cancelPendingPhotoKey("聆听拍照时 state=${_state.value}")
             return
         }
-        SharedCameraCapture.forceReset()
+        prepareCameraForPhotoSession()
         audioManager.stopRecording()
         webSocketManager.sendStopListening()
         pendingAutoStart = false

@@ -43,7 +43,7 @@ object SharedCameraCapture {
             captureInProgress = false
             onResult(result)
         }
-        val session = dashcamSession
+        val session = dashcamSession.takeIf { DashcamForeground.isActive }
         if (session != null) {
             val file = DashcamRecordingStore.createPhotoFile(context.applicationContext)
             session.takePicture(file, finish)

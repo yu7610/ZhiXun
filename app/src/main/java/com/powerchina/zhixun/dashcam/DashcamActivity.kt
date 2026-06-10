@@ -21,6 +21,16 @@ class DashcamActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        DashcamForeground.setActive(true)
+    }
+
+    override fun onPause() {
+        DashcamForeground.setActive(false)
+        super.onPause()
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             ScreenOnHelper.onUserInteraction(this)

@@ -19,15 +19,18 @@ class DashcamCameraSession(
 ) {
     fun takePicture(outputFile: File, onResult: (Result<File>) -> Unit) {
         val options = ImageCapture.OutputFileOptions.Builder(outputFile).build()
+        val silencer = SilentImageCapture.muteForCapture(context)
         imageCapture.takePicture(
             options,
             mainExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    silencer.restore()
                     onResult(Result.success(outputFile))
                 }
 
                 override fun onError(exception: ImageCaptureException) {
+                    silencer.restore()
                     onResult(Result.failure(exception))
                 }
             },

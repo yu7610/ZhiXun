@@ -12,6 +12,10 @@ import androidx.lifecycle.ProcessLifecycleOwner
  */
 object PhysicalKeyLifecycle {
 
+    @Volatile
+    var resumedActivity: Activity? = null
+        private set
+
     fun register(application: Application) {
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
@@ -29,12 +33,17 @@ object PhysicalKeyLifecycle {
             }
 
             override fun onActivityResumed(activity: Activity) {
-                // Compose/ComponentActivity 可能重置 Window.Callback，每次 Resume 重新安装
+                resumedActivity = activity
                 PhysicalKeyWindowCallback.install(activity)
             }
 
             override fun onActivityStarted(activity: Activity) = Unit
-            override fun onActivityPaused(activity: Activity) = Unit
+
+            override fun onActivityPaused(activity: Activity) {
+                if (resumedActivity === activity) {
+                    resumedActivity = null
+                }
+            }
             override fun onActivityStopped(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit

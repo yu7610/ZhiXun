@@ -13,14 +13,17 @@ import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.Executor
 import kotlinx.coroutines.Dispatchers
@@ -42,13 +45,36 @@ fun DashcamCameraPreview(
         }
     }
     var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var bindGeneration by remember { mutableIntStateOf(0) }
 
     AndroidView(
         factory = { previewView },
         modifier = modifier,
     )
 
-    LaunchedEffect(lensFacing) {
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    runCatching { cameraProviderRef?.unbindAll() }
+                    onSessionReady(null)
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    bindGeneration++
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            onSessionReady(null)
+            runCatching { cameraProviderRef?.unbindAll() }
+            cameraProviderRef = null
+        }
+    }
+
+    LaunchedEffect(lensFacing, bindGeneration) {
         val cameraProvider = withContext(Dispatchers.IO) {
             ProcessCameraProvider.getInstance(context).get()
         }
@@ -64,13 +90,6 @@ fun DashcamCameraPreview(
         )
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            onSessionReady(null)
-            runCatching { cameraProviderRef?.unbindAll() }
-            cameraProviderRef = null
-        }
-    }
 }
 
 private fun bindCamera(
@@ -85,9 +104,7 @@ private fun bindCamera(
     val preview = Preview.Builder().build().also {
         it.surfaceProvider = previewView.surfaceProvider
     }
-    val imageCapture = ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-        .build()
+    val imageCapture = SilentImageCapture.build()
     val recorder = Recorder.Builder()
         .setQualitySelector(QualitySelector.from(Quality.HD))
         .build()

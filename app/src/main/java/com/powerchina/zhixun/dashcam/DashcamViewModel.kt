@@ -69,6 +69,17 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     init {
         refreshClips()
         refreshPhotos()
+        DashcamForeground.onBackground = {
+            releaseCameraForBackground()
+        }
+    }
+
+    private fun releaseCameraForBackground() {
+        if (_isRecording.value) {
+            Log.i(TAG, "执法仪进入后台，停止录像以释放相机")
+            stopRecordingIfActive()
+        }
+        bindCameraSession(null)
     }
 
     fun bindCameraSession(session: DashcamCameraSession?) {
@@ -450,6 +461,8 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     override fun onCleared() {
+        DashcamForeground.onBackground = null
+        DashcamForeground.setActive(false)
         SharedCameraCapture.dashcamSession = null
         stopFrameUploadLoop()
         compressJob?.cancel()
