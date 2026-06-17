@@ -1,17 +1,13 @@
 package com.powerchina.zhixun.dashcam
 
 import android.Manifest
-import android.content.Context
 import android.graphics.BitmapFactory
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
-import android.os.Environment
-import android.os.StatFs
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,10 +24,13 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -52,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -64,7 +64,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.powerchina.zhixun.R
-import com.powerchina.zhixun.data.ConfigManager
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -78,7 +77,6 @@ private val RecRed = Color(0xFFD32F2F)
 private val BtnStartGreen = Color(0xFF43A047)
 private val BtnPurple = Color(0xFF7E57C2)
 private val BtnBlue = Color(0xFF1E88E5)
-private val BtnOrange = Color(0xFFFB8C00)
 private val BtnPlayback = Color(0xFF455A64)
 private val PanelBg = Color(0xFFF3F4F6)
 
@@ -91,18 +89,22 @@ fun DashcamScreen(
 ) {
     val context = LocalContext.current
     val isRecording by viewModel.isRecording.collectAsState()
-    val isAudioRecording by viewModel.isAudioRecording.collectAsState()
     val elapsedSeconds by viewModel.elapsedSeconds.collectAsState()
     val clips by viewModel.clips.collectAsState()
-    val photos by viewModel.photos.collectAsState()
     val isPhotoUploading by viewModel.isPhotoUploading.collectAsState()
     val message by viewModel.message.collectAsState()
+    val photoFollowUpMode by viewModel.photoFollowUpMode.collectAsState()
+    val isVoiceHolding by viewModel.isVoiceHolding.collectAsState()
+    val voiceOverlayText by viewModel.voiceOverlayText.collectAsState()
+    val isVoiceTranscribing by viewModel.isVoiceTranscribing.collectAsState()
+    val showUploadConfirm by viewModel.showUploadConfirm.collectAsState()
+    val pendingVoiceText by viewModel.pendingVoiceText.collectAsState()
+    val asrUnavailable by viewModel.asrUnavailable.collectAsState()
+    val useLocalVoiceAsr by viewModel.useLocalVoiceAsr.collectAsState()
 
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var playingClip by remember { mutableStateOf<DashcamClip?>(null) }
-    var viewingPhoto by remember { mutableStateOf<DashcamPhoto?>(null) }
     var showPlaybackSheet by remember { mutableStateOf(false) }
-    var showPhotoSheet by remember { mutableStateOf(false) }
 
     val permissionsState = rememberMultiplePermissionsState(
         permissions = buildList {
@@ -117,10 +119,6 @@ fun DashcamScreen(
     )
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    val deviceId = remember { ConfigManager(context).loadConfig().macAddress.ifBlank { "未知设备" } }
-    val clockText = rememberClockText()
-    val storageInfo = rememberStorageInfo(context)
-    val networkConnected = rememberNetworkConnected(context)
 
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
@@ -163,12 +161,13 @@ fun DashcamScreen(
         }
     }
 
-    viewingPhoto?.let { photo ->
-        DashcamPhotoViewerDialog(
-            photo = photo,
+    if (showUploadConfirm) {
+        UploadConfirmDialog(
+            voiceText = pendingVoiceText.orEmpty(),
+            asrUnavailable = asrUnavailable,
             isUploading = isPhotoUploading,
-            onUpload = { viewModel.uploadPhoto(photo) },
-            onDismiss = { viewingPhoto = null },
+            onConfirm = { viewModel.confirmPendingUpload() },
+            onDismiss = { viewModel.cancelPendingUpload() },
         )
     }
 
@@ -180,21 +179,6 @@ fun DashcamScreen(
                 showPlaybackSheet = false
                 if (clip.file.exists() && clip.file.length() > 0L) {
                     playingClip = clip
-                } else {
-                    scope.launch { snackbar.showSnackbar("文件不存在") }
-                }
-            },
-        )
-    }
-
-    if (showPhotoSheet) {
-        PhotoGalleryBottomSheet(
-            photos = photos,
-            onDismiss = { showPhotoSheet = false },
-            onView = { photo ->
-                showPhotoSheet = false
-                if (photo.file.exists() && photo.file.length() > 0L) {
-                    viewingPhoto = photo
                 } else {
                     scope.launch { snackbar.showSnackbar("文件不存在") }
                 }
@@ -224,19 +208,13 @@ fun DashcamScreen(
                         onBack = onBack,
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth(),
+                    if (photoFollowUpMode == PhotoFollowUpMode.VoiceNote &&
+                        (isVoiceHolding || isVoiceTranscribing || !voiceOverlayText.isNullOrBlank())
                     ) {
-                        StatusInfoBar(
-                            storageTotal = storageInfo.first,
-                            storageAvailable = storageInfo.second,
-                            networkConnected = networkConnected,
-                        )
-                        PreviewInfoOverlay(
-                            clockText = clockText,
-                            deviceId = deviceId,
+                        VoiceTranscriptOverlay(
+                            text = voiceOverlayText,
+                            isTranscribing = isVoiceTranscribing,
+                            modifier = Modifier.align(Alignment.Center),
                         )
                     }
                 } else {
@@ -256,19 +234,13 @@ fun DashcamScreen(
             ControlButtonPanel(
                 enabled = permissionsState.allPermissionsGranted,
                 isRecording = isRecording,
-                isAudioRecording = isAudioRecording,
-                onAudio = { viewModel.toggleAudioRecording() },
+                photoFollowUpMode = photoFollowUpMode,
+                isVoiceHolding = isVoiceHolding,
+                useLocalVoiceAsr = useLocalVoiceAsr,
                 onPhoto = { viewModel.takePhoto() },
+                onVoicePressStart = { viewModel.onVoiceNotePressStart() },
+                onVoicePressEnd = { viewModel.onVoiceNotePressEnd() },
                 onRecordToggle = { viewModel.toggleRecording() },
-                onUpload = {
-                    if (viewModel.hasPhotosAfterRefresh()) {
-                        showPhotoSheet = true
-                    } else {
-                        scope.launch {
-                            snackbar.showSnackbar(context.getString(R.string.dashcam_no_photos))
-                        }
-                    }
-                },
                 onPlayback = {
                     if (clips.isEmpty()) {
                         scope.launch { snackbar.showSnackbar(context.getString(R.string.dashcam_no_clip_playback)) }
@@ -349,91 +321,76 @@ private fun DashcamTopBar(
 }
 
 @Composable
-private fun PreviewInfoOverlay(
-    clockText: String,
-    deviceId: String,
+private fun VoiceTranscriptOverlay(
+    text: String?,
+    isTranscribing: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    Card(
         modifier = modifier
-            .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.55f))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 24.dp)
+            .fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.78f)),
+        shape = RoundedCornerShape(12.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                text = clockText,
-                color = Color.White,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-            Text(
-                text = stringResource(R.string.dashcam_gps_placeholder),
-                color = Color.White,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-        }
         Text(
-            text = stringResource(R.string.dashcam_device_id, deviceId),
-            color = Color.White.copy(alpha = 0.9f),
-            fontSize = 11.sp,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 4.dp),
-            textAlign = TextAlign.Center,
-            fontFamily = FontFamily.Monospace,
+            text = when {
+                isTranscribing -> stringResource(R.string.dashcam_voice_transcribing)
+                !text.isNullOrBlank() -> text
+                else -> stringResource(R.string.dashcam_voice_transcribing)
+            },
+            color = Color.White,
+            fontSize = 16.sp,
+            lineHeight = 22.sp,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
         )
     }
 }
 
 @Composable
-private fun StatusInfoBar(
-    storageTotal: String,
-    storageAvailable: String,
-    networkConnected: Boolean,
+private fun UploadConfirmDialog(
+    voiceText: String,
+    asrUnavailable: Boolean,
+    isUploading: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(
-            text = stringResource(R.string.dashcam_resolution),
-            color = Color.White,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Text(
-            text = stringResource(R.string.dashcam_storage, storageTotal, storageAvailable),
-            color = Color.White.copy(alpha = 0.9f),
-            fontSize = 13.sp,
-        )
-        Text(
-            text = stringResource(
-                if (networkConnected) R.string.dashcam_network_connected else R.string.dashcam_network_offline,
-            ),
-            color = if (networkConnected) Color(0xFF81C784) else Color.White.copy(alpha = 0.7f),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-    }
+    AlertDialog(
+        onDismissRequest = { if (!isUploading) onDismiss() },
+        title = { Text(stringResource(R.string.dashcam_upload_confirm_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when {
+                    asrUnavailable -> Text(stringResource(R.string.dashcam_upload_confirm_asr_failed))
+                    voiceText.isNotBlank() -> Text(voiceText)
+                    else -> Text(stringResource(R.string.dashcam_upload_no_voice))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !isUploading) {
+                Text(stringResource(R.string.dashcam_upload_confirm_send))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !isUploading) {
+                Text(stringResource(R.string.dashcam_upload_confirm_cancel))
+            }
+        },
+    )
 }
 
 @Composable
 private fun ControlButtonPanel(
     enabled: Boolean,
     isRecording: Boolean,
-    isAudioRecording: Boolean,
-    onAudio: () -> Unit,
+    photoFollowUpMode: PhotoFollowUpMode,
+    isVoiceHolding: Boolean,
+    useLocalVoiceAsr: Boolean,
     onPhoto: () -> Unit,
+    onVoicePressStart: () -> Unit,
+    onVoicePressEnd: () -> Unit,
     onRecordToggle: () -> Unit,
-    onUpload: () -> Unit,
     onPlayback: () -> Unit,
 ) {
     Column(
@@ -441,56 +398,100 @@ private fun ControlButtonPanel(
             .fillMaxWidth()
             .background(PanelBg)
             .padding(horizontal = 12.dp, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            DashcamActionButton(
-                text = stringResource(R.string.dashcam_btn_audio),
-                color = if (isAudioRecording) RecRed else BtnPurple,
-                enabled = enabled && !isRecording,
-                modifier = Modifier.weight(1f),
-                onClick = onAudio,
-            )
-            DashcamActionButton(
-                text = stringResource(R.string.dashcam_btn_photo),
-                color = BtnBlue,
-                enabled = enabled,
-                modifier = Modifier.weight(1.15f),
-                height = 56.dp,
-                onClick = onPhoto,
-            )
-            DashcamActionButton(
+        if (photoFollowUpMode == PhotoFollowUpMode.VoiceNote) {
+            Text(
                 text = stringResource(
-                    if (isRecording) R.string.dashcam_btn_stop else R.string.dashcam_btn_start,
+                    when {
+                        isVoiceHolding -> R.string.dashcam_voice_holding
+                        useLocalVoiceAsr -> R.string.dashcam_voice_hint_local
+                        else -> R.string.dashcam_voice_hint
+                    },
                 ),
-                color = if (isRecording) RecRed else BtnStartGreen,
-                enabled = enabled && !isAudioRecording,
-                modifier = Modifier.weight(1f),
-                onClick = onRecordToggle,
+                color = Color(0xFF455A64),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
             )
         }
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (photoFollowUpMode == PhotoFollowUpMode.VoiceNote) {
+                DashcamMicButton(
+                    enabled = enabled,
+                    isHolding = isVoiceHolding,
+                    modifier = Modifier.weight(1f),
+                    onPressStart = onVoicePressStart,
+                    onPressEnd = onVoicePressEnd,
+                )
+            } else {
+                DashcamActionButton(
+                    text = stringResource(R.string.dashcam_btn_photo),
+                    color = BtnBlue,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                    height = 56.dp,
+                    onClick = onPhoto,
+                )
+            }
             DashcamActionButton(
-                text = stringResource(R.string.dashcam_btn_upload),
-                color = BtnOrange,
+                text = stringResource(
+                    if (isRecording) R.string.dashcam_btn_stop else R.string.dashcam_btn_start,
+                ),
+                color = if (isRecording) RecRed else BtnStartGreen,
                 enabled = enabled,
                 modifier = Modifier.weight(1f),
-                onClick = onUpload,
+                height = 56.dp,
+                onClick = onRecordToggle,
             )
             DashcamActionButton(
                 text = stringResource(R.string.dashcam_btn_playback),
                 color = BtnPlayback,
                 enabled = enabled,
                 modifier = Modifier.weight(1f),
+                height = 56.dp,
                 onClick = onPlayback,
             )
         }
+    }
+}
+
+@Composable
+private fun DashcamMicButton(
+    enabled: Boolean,
+    isHolding: Boolean,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val color = if (isHolding) RecRed else BtnPurple
+    Box(
+        modifier = modifier
+            .height(56.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (enabled) color else color.copy(alpha = 0.4f))
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectTapGestures(
+                    onPress = {
+                        onPressStart()
+                        tryAwaitRelease()
+                        onPressEnd()
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Mic,
+            contentDescription = stringResource(R.string.dashcam_voice_hint),
+            tint = Color.White,
+            modifier = Modifier.size(28.dp),
+        )
     }
 }
 
@@ -704,45 +705,6 @@ private fun PermissionPlaceholder(onRequest: () -> Unit, modifier: Modifier = Mo
     }
 }
 
-@Composable
-private fun rememberClockText(): String {
-    var text by remember {
-        mutableStateOf(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()))
-    }
-    LaunchedEffect(Unit) {
-        while (true) {
-            text = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-            kotlinx.coroutines.delay(1000)
-        }
-    }
-    return text
-}
-
-@Composable
-private fun rememberStorageInfo(context: Context): Pair<String, String> {
-    return remember {
-        runCatching {
-            val dir = DashcamRecordingStore.publicVideoStorageDir()
-            val stat = StatFs(dir.absolutePath)
-            val total = stat.totalBytes
-            val avail = stat.availableBytes
-            formatStorageGb(total) to formatStorageGb(avail)
-        }.getOrElse { "—" to "—" }
-    }
-}
-
-@Composable
-private fun rememberNetworkConnected(context: Context): Boolean {
-    return remember {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-        val network = cm?.activeNetwork ?: return@remember false
-        val caps = cm.getNetworkCapabilities(network) ?: return@remember false
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-    }
-}
-
 private fun formatRecDuration(totalSeconds: Int): String {
     val hours = TimeUnit.SECONDS.toHours(totalSeconds.toLong())
     val minutes = TimeUnit.SECONDS.toMinutes(totalSeconds.toLong()) % 60
@@ -757,13 +719,4 @@ private fun formatFileSize(bytes: Long): String {
     val mb = kb / 1024.0
     if (mb < 1024) return String.format(Locale.getDefault(), "%.1f MB", mb)
     return String.format(Locale.getDefault(), "%.1f GB", mb / 1024.0)
-}
-
-private fun formatStorageGb(bytes: Long): String {
-    val gb = bytes / (1024.0 * 1024.0 * 1024.0)
-    return if (gb >= 1) {
-        String.format(Locale.getDefault(), "%.0fGB", gb)
-    } else {
-        String.format(Locale.getDefault(), "%.0fMB", bytes / (1024.0 * 1024.0))
-    }
 }

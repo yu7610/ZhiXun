@@ -228,38 +228,6 @@ fun SettingsScreen(
                         )
                     }
                 }
-
-                // Tips Section
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            "Tips:",
-                            color = AethericColors.OnSurfaceVariant.copy(alpha = 0.6f),
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Text(
-                            "1.默认连接小智官方服务",
-                            color = AethericColors.OnSurfaceVariant.copy(alpha = 0.5f),
-                            fontSize = 12.sp
-                        )
-                        Text(
-                            "2.设备名称和Token不影响对话",
-                            color = AethericColors.OnSurfaceVariant.copy(alpha = 0.5f),
-                            fontSize = 12.sp
-                        )
-                        Text(
-                            "3.Mac地址可随机生成",
-                            color = AethericColors.OnSurfaceVariant.copy(alpha = 0.5f),
-                            fontSize = 12.sp
-                        )
-                    }
-                }
                 
                 item {
                     Spacer(modifier = Modifier.height(32.dp))

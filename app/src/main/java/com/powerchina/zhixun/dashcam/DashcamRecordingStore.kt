@@ -906,6 +906,11 @@ object DashcamRecordingStore {
         return File(recordingsDir(context), "AUD_$stamp.m4a")
     }
 
+    fun createVoiceNoteFile(context: Context): File {
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        return File(recordingsDir(context), "AUD_$stamp.m4a")
+    }
+
     fun createCompressTempFile(source: File): File =
         File(source.parentFile, "${source.name}.compressing")
 
@@ -937,7 +942,8 @@ object DashcamRecordingStore {
         val videos = listVideoClipsFromMediaStore(context) +
             listMediaClipsFromDir(sdcard0VideoDir(), DashcamClipType.VIDEO, "mp4") +
             listMediaClipsFromDir(recordingsDir(context), DashcamClipType.VIDEO, "mp4")
-        val audios = listMediaClipsFromDir(recordingsDir(context), DashcamClipType.AUDIO, "m4a")
+        val audioDir = recordingsDir(context)
+        val audios = listMediaClipsFromDir(audioDir, DashcamClipType.AUDIO, "m4a")
         return (videos + audios)
             .distinctBy { clip ->
                 runCatching { clip.file.canonicalPath }

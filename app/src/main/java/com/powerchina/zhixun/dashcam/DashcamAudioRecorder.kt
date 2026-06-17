@@ -28,12 +28,17 @@ class DashcamAudioRecorder(private val context: Context) {
         mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
         mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+        mediaRecorder.setAudioSamplingRate(16_000)
+        mediaRecorder.setAudioEncodingBitRate(64_000)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            mediaRecorder.setAudioChannels(1)
+        }
         mediaRecorder.setOutputFile(outputFile.absolutePath)
         mediaRecorder.prepare()
         mediaRecorder.start()
         recorder = mediaRecorder
         this.outputFile = outputFile
-        Log.i(TAG, "开始录音 ${outputFile.name}")
+        Log.i(TAG, "开始录音 path=${outputFile.absolutePath}")
     }
 
     fun stop(): Result<File> = runCatching {
@@ -44,7 +49,7 @@ class DashcamAudioRecorder(private val context: Context) {
         recorder = null
         outputFile = null
         require(file.exists() && file.length() > 0L) { "录音文件为空" }
-        Log.i(TAG, "停止录音 ${file.name} size=${file.length()}B")
+        Log.i(TAG, "停止录音 path=${file.absolutePath} size=${file.length()}B")
         file
     }
 

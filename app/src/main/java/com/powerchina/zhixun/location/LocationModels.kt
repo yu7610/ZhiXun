@@ -3,22 +3,6 @@ package com.powerchina.zhixun.location
 data class TrackPoint(
     val latitude: Double,
     val longitude: Double,
-    val altitude: Double,
-    val speedMps: Float,
-    val timestampMs: Long,
-)
-
-data class DailyTrackStats(
-    val mileageKm: Double,
-    val stayMinutes: Int,
-    val pointCount: Int,
-)
-
-data class DailyTrackHistory(
-    val dateLabel: String,
-    val mileageKm: Double,
-    val stayMinutes: Int,
-    val pointCount: Int,
 )
 
 data class LocationUiState(
@@ -29,8 +13,6 @@ data class LocationUiState(
     val riskTitle: String = "风险告警",
     val riskMessage: String = "未进入工区",
     val riskActive: Boolean = false,
-    val todayStats: DailyTrackStats = DailyTrackStats(0.0, 0, 0),
-    val history: List<DailyTrackHistory> = emptyList(),
     val trackPoints: List<TrackPoint> = emptyList(),
     val startPoint: TrackPoint? = null,
     val currentLat: Double? = null,
@@ -46,5 +28,4 @@ enum class LocationTab {
     LOCATE,
     FENCE,
     TRACK,
-    HISTORY,
 }

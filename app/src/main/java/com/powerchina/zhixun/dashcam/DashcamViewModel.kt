@@ -20,6 +20,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
+enum class PhotoFollowUpMode {
+    Capture,
+    VoiceNote,
+}
+
 class DashcamViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application.applicationContext
 
@@ -52,7 +57,36 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private val _isAudioRecording = MutableStateFlow(false)
     val isAudioRecording: StateFlow<Boolean> = _isAudioRecording.asStateFlow()
 
+    private val _photoFollowUpMode = MutableStateFlow(PhotoFollowUpMode.Capture)
+    val photoFollowUpMode: StateFlow<PhotoFollowUpMode> = _photoFollowUpMode.asStateFlow()
+
+    private val _pendingPhoto = MutableStateFlow<DashcamPhoto?>(null)
+    val pendingPhoto: StateFlow<DashcamPhoto?> = _pendingPhoto.asStateFlow()
+
+    private val _isVoiceHolding = MutableStateFlow(false)
+    val isVoiceHolding: StateFlow<Boolean> = _isVoiceHolding.asStateFlow()
+
+    private val _voiceOverlayText = MutableStateFlow<String?>(null)
+    val voiceOverlayText: StateFlow<String?> = _voiceOverlayText.asStateFlow()
+
+    private val _isVoiceTranscribing = MutableStateFlow(false)
+    val isVoiceTranscribing: StateFlow<Boolean> = _isVoiceTranscribing.asStateFlow()
+
+    private val _showUploadConfirm = MutableStateFlow(false)
+    val showUploadConfirm: StateFlow<Boolean> = _showUploadConfirm.asStateFlow()
+
+    private val _pendingVoiceText = MutableStateFlow<String?>(null)
+    val pendingVoiceText: StateFlow<String?> = _pendingVoiceText.asStateFlow()
+
+    private val _asrUnavailable = MutableStateFlow(false)
+    val asrUnavailable: StateFlow<Boolean> = _asrUnavailable.asStateFlow()
+
+    private val _useLocalVoiceAsr = MutableStateFlow(false)
+    val useLocalVoiceAsr: StateFlow<Boolean> = _useLocalVoiceAsr.asStateFlow()
+
     private val audioRecorder = DashcamAudioRecorder(app)
+    private var voiceNoteFile: File? = null
+    private var localVoiceRecognizer: DashcamLocalVoiceRecognizer? = null
 
     private var cameraSession: DashcamCameraSession? = null
     private val recordingController: DashcamRecordingController?
@@ -65,6 +99,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private val recordingStartInProgress = AtomicBoolean(false)
     private var hasAutoStarted = false
     private var userStoppedRecording = false
+    private var pendingPhotoAfterStop = false
 
     init {
         refreshClips()
@@ -108,6 +143,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     fun tryAutoStartRecording() {
         val controller = recordingController ?: return
         if (userStoppedRecording || _isAudioRecording.value) return
+        if (_photoFollowUpMode.value == PhotoFollowUpMode.VoiceNote) return
         if (_isRecording.value || controller.isRecording || recordingStartInProgress.get()) return
         if (!hasAutoStarted) hasAutoStarted = true
         startRecording(controller)
@@ -126,39 +162,31 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         return _photos.value.isNotEmpty()
     }
 
-    fun uploadPhoto(photo: DashcamPhoto) {
+    fun uploadPhoto(
+        photo: DashcamPhoto,
+        voiceNote: String? = null,
+        onSuccess: (() -> Unit)? = null,
+    ) {
         if (_isPhotoUploading.value) return
-        RecordingFrameTts.warmUp(getApplication())
         viewModelScope.launch {
             _isPhotoUploading.value = true
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    var jpegBytes = XiaozhiPhotoUploader.compressJpegForUpload(photo.file)
-                    if (jpegBytes.size > 180_000) {
-                        jpegBytes = XiaozhiPhotoUploader.compressJpegForUpload(
-                            photo.file,
-                            maxWidth = 480,
-                            quality = 65,
-                        )
-                    }
-                    val deviceId = ConfigManager(getApplication()).loadConfig().macAddress
-                    RecordingFrameUploader.uploadFrame(
+                    val markText = voiceNote?.trim().orEmpty()
+                    require(markText.isNotBlank()) { "请先补充语音说明" }
+                    val terCode = ConfigManager(getApplication()).loadConfig().macAddress
+                    DashcamMarkedImgUploader.upload(
                         context = app,
-                        deviceId = deviceId,
-                        jpegBytes = jpegBytes,
-                        filename = photo.file.name,
+                        photoFile = photo.file,
+                        markText = markText,
+                        terCode = terCode,
                     ).getOrThrow()
                 }
             }
             _isPhotoUploading.value = false
-            result.onSuccess { raw ->
-                val speakText = RecordingFrameUploader.parseSpeakText(raw)
-                if (speakText != null) {
-                    RecordingFrameTts.speak(getApplication(), speakText)
-                    showMessage("上传成功：$speakText")
-                } else {
-                    showMessage("上传成功")
-                }
+            result.onSuccess {
+                onSuccess?.invoke()
+                showMessage("提交成功")
             }.onFailure {
                 showMessage(it.message ?: "上传失败")
             }
@@ -166,6 +194,140 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun takePhoto() {
+        if (_photoFollowUpMode.value == PhotoFollowUpMode.VoiceNote) return
+        if (_isRecording.value) {
+            pendingPhotoAfterStop = true
+            stopRecording(markUserStopped = false)
+            return
+        }
+        capturePhotoInternal()
+    }
+
+    fun onVoiceNotePressStart() {
+        if (_photoFollowUpMode.value != PhotoFollowUpMode.VoiceNote) return
+        if (_isVoiceHolding.value || _isVoiceTranscribing.value) return
+        _voiceOverlayText.value = null
+        _pendingVoiceText.value = null
+        _showUploadConfirm.value = false
+        _asrUnavailable.value = false
+        if (_useLocalVoiceAsr.value) {
+            Log.i(DashcamAsrUploader.TAG, "按住说话 -> 本机识别")
+            val recognizer = ensureLocalVoiceRecognizer()
+            _isVoiceHolding.value = true
+            if (!recognizer.startListening()) _isVoiceHolding.value = false
+            return
+        }
+        DashcamAsrUploader.resetReachabilityCache()
+        val file = DashcamRecordingStore.createVoiceNoteFile(app)
+        Log.i(DashcamAsrUploader.TAG, "按住说话 -> 录音 path=${file.absolutePath}")
+        audioRecorder.start(file).onSuccess {
+            voiceNoteFile = file
+            _isVoiceHolding.value = true
+        }.onFailure {
+            Log.e(DashcamAsrUploader.TAG, "录音启动失败", it)
+            file.delete()
+            showMessage(it.message ?: "录音失败")
+        }
+    }
+
+    fun onVoiceNotePressEnd() {
+        if (!_isVoiceHolding.value) return
+        _isVoiceHolding.value = false
+        if (_useLocalVoiceAsr.value) {
+            Log.i(DashcamAsrUploader.TAG, "松开 -> 本机识别结束")
+            _isVoiceTranscribing.value = true
+            localVoiceRecognizer?.stopListening()
+            return
+        }
+        Log.i(DashcamAsrUploader.TAG, "松开 -> 停止录音，调用云端 ASR")
+        _isVoiceTranscribing.value = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val m4aFile = audioRecorder.stop().getOrThrow()
+                    voiceNoteFile = null
+                    refreshClips()
+                    Log.i(
+                        DashcamAsrUploader.TAG,
+                        "录音已保存 path=${m4aFile.absolutePath} size=${m4aFile.length()}B，开始调用 ASR",
+                    )
+                    DashcamAsrUploader.transcribe(app, m4aFile).getOrThrow()
+                }
+            }
+            _isVoiceTranscribing.value = false
+            result.onSuccess { text ->
+                Log.i(DashcamAsrUploader.TAG, "ASR 成功: $text")
+                _voiceOverlayText.value = text
+                _pendingVoiceText.value = text
+                _showUploadConfirm.value = true
+            }.onFailure { error ->
+                voiceNoteFile = null
+                if (DashcamAsrUploader.isConnectionError(error)) {
+                    Log.w(DashcamAsrUploader.TAG, "云端 ASR 连接失败，降级本机识别", error)
+                    _useLocalVoiceAsr.value = true
+                    showMessage("云端识别暂不可用，请再按住麦克风说话")
+                } else {
+                    Log.e(DashcamAsrUploader.TAG, "ASR 失败", error)
+                    showMessage(DashcamAsrUploader.friendlyMessage(error))
+                }
+            }
+        }
+    }
+
+    fun confirmPendingUpload() {
+        val photo = _pendingPhoto.value ?: return
+        uploadPhoto(photo, _pendingVoiceText.value) {
+            resetPhotoFollowUp(resumeRecording = false)
+            userStoppedRecording = true
+        }
+    }
+
+    fun cancelPendingUpload() {
+        resetPhotoFollowUp(resumeRecording = false)
+        userStoppedRecording = true
+        showMessage("已取消上传")
+    }
+
+    private fun ensureLocalVoiceRecognizer(): DashcamLocalVoiceRecognizer {
+        return localVoiceRecognizer ?: DashcamLocalVoiceRecognizer(
+            context = app,
+            onPartial = { partial -> _voiceOverlayText.value = partial },
+            onFinal = { text ->
+                _isVoiceTranscribing.value = false
+                _voiceOverlayText.value = text
+                _pendingVoiceText.value = text
+                _showUploadConfirm.value = true
+            },
+            onError = { message ->
+                _isVoiceTranscribing.value = false
+                showMessage(message)
+            },
+        ).also { localVoiceRecognizer = it }
+    }
+
+    private fun resetPhotoFollowUp(resumeRecording: Boolean) {
+        localVoiceRecognizer?.cancel()
+        if (_isVoiceHolding.value || audioRecorder.isRecording) {
+            audioRecorder.release()
+            voiceNoteFile?.delete()
+            voiceNoteFile = null
+        }
+        _photoFollowUpMode.value = PhotoFollowUpMode.Capture
+        _pendingPhoto.value = null
+        _pendingVoiceText.value = null
+        _voiceOverlayText.value = null
+        _isVoiceHolding.value = false
+        _isVoiceTranscribing.value = false
+        _showUploadConfirm.value = false
+        _asrUnavailable.value = false
+        _useLocalVoiceAsr.value = false
+        if (resumeRecording) {
+            userStoppedRecording = false
+            tryAutoStartRecording()
+        }
+    }
+
+    private fun capturePhotoInternal() {
         val session = cameraSession
         if (session == null) {
             showMessage("相机未就绪")
@@ -180,10 +342,24 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             photoCaptureInProgress.set(false)
             result.onSuccess { saved ->
                 refreshPhotos()
-                showMessage("照片已保存：${saved.name}")
+                val photo = _photos.value.firstOrNull { it.file.absolutePath == saved.absolutePath }
+                    ?: DashcamPhoto(
+                        file = saved,
+                        displayName = saved.name,
+                        sizeBytes = saved.length(),
+                        lastModifiedMs = saved.lastModified(),
+                    )
+                _pendingPhoto.value = photo
+                _photoFollowUpMode.value = PhotoFollowUpMode.VoiceNote
+                _useLocalVoiceAsr.value = false
+                DashcamAsrUploader.resetReachabilityCache()
+                Log.i(DashcamAsrUploader.TAG, "拍照完成，进入语音说明流程 ${saved.name}")
+                showMessage("照片已保存，请补充语音说明")
             }.onFailure {
                 file.delete()
                 showMessage(it.message ?: "拍照失败")
+                userStoppedRecording = false
+                tryAutoStartRecording()
             }
         }
     }
@@ -207,6 +383,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         val file = DashcamRecordingStore.createAudioOutputFile(app)
+        Log.i(DashcamAudioRecorder.TAG, "独立录音 -> path=${file.absolutePath}")
         val started = audioRecorder.start(file)
         started.onSuccess {
             userStoppedRecording = true
@@ -220,9 +397,10 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private fun stopAudioRecording() {
         val result = audioRecorder.stop()
         _isAudioRecording.value = false
-        result.onSuccess { file ->
+        result.onSuccess { m4aFile ->
             refreshClips()
-            showMessage("录音已保存：${file.name}")
+            Log.i(DashcamAudioRecorder.TAG, "独立录音已保存 path=${m4aFile.absolutePath}")
+            showMessage("录音已保存：${m4aFile.name}")
         }.onFailure {
             showMessage(it.message ?: "录音保存失败")
         }
@@ -232,6 +410,9 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         if (_isAudioRecording.value) {
             showMessage("请先停止录音")
             return
+        }
+        if (_photoFollowUpMode.value == PhotoFollowUpMode.VoiceNote) {
+            resetPhotoFollowUp(resumeRecording = false)
         }
         val controller = recordingController
         if (controller == null) {
@@ -314,8 +495,15 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun stopRecording() {
-        val controller = recordingController ?: return
+    private fun stopRecording(markUserStopped: Boolean = true) {
+        val controller = recordingController ?: run {
+            if (pendingPhotoAfterStop) {
+                pendingPhotoAfterStop = false
+                capturePhotoInternal()
+            }
+            return
+        }
+        if (markUserStopped) userStoppedRecording = true
         controller.stopRecording { result ->
             _isRecording.value = false
             stopTimer()
@@ -327,10 +515,18 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                     }
                     refreshClips()
                     scheduleCompressRecording(output)
+                    if (pendingPhotoAfterStop) {
+                        pendingPhotoAfterStop = false
+                        capturePhotoInternal()
+                    }
                 }
             }.onFailure {
                 refreshClips()
                 showMessage("录像停止失败: ${it.message ?: "未知错误"}")
+                if (pendingPhotoAfterStop) {
+                    pendingPhotoAfterStop = false
+                    capturePhotoInternal()
+                }
             }
         }
     }
@@ -467,6 +663,13 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         stopFrameUploadLoop()
         compressJob?.cancel()
         RecordingFrameTts.shutdown()
+        localVoiceRecognizer?.destroy()
+        localVoiceRecognizer = null
+        if (_isVoiceHolding.value || audioRecorder.isRecording) {
+            audioRecorder.release()
+            voiceNoteFile?.delete()
+            voiceNoteFile = null
+        }
         if (_isAudioRecording.value) {
             audioRecorder.release()
             _isAudioRecording.value = false

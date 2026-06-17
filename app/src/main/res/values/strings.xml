@@ -36,6 +36,15 @@
     <string name="dashcam_btn_start">开始</string>
     <string name="dashcam_btn_upload">图传</string>
     <string name="dashcam_btn_playback">回放</string>
+    <string name="dashcam_voice_hint">按住补充语音说明</string>
+    <string name="dashcam_voice_hint_local">云端不可用，按住用本机识别</string>
+    <string name="dashcam_voice_holding">松开结束</string>
+    <string name="dashcam_voice_transcribing">识别中…</string>
+    <string name="dashcam_upload_confirm_title">是否上传？</string>
+    <string name="dashcam_upload_confirm_send">确认发送</string>
+    <string name="dashcam_upload_confirm_cancel">取消</string>
+    <string name="dashcam_upload_confirm_asr_failed">语音识别服务暂不可用（18006 未连通），是否仍上传照片？</string>
+    <string name="dashcam_upload_no_voice">（未获取语音说明）</string>
     <string name="dashcam_feature_coming">功能开发中</string>
     <string name="feature_location">定位</string>
     <string name="location_track_title">定位轨迹</string>

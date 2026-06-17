@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.RectF
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -101,16 +100,15 @@ fun BaiduMapContainer(
 
         val overlays = mutableListOf<OverlayOptions>()
 
-        uiState.startPoint?.let { start ->
-            overlays.add(
-                MarkerOptions()
-                    .position(LatLng(start.latitude, start.longitude))
-                    .icon(startMarkerIcon)
-                    .title("起点"),
-            )
-        }
-
-        if (uiState.tab == LocationTab.TRACK || uiState.tab == LocationTab.LOCATE) {
+        if (uiState.tab == LocationTab.TRACK) {
+            uiState.startPoint?.let { start ->
+                overlays.add(
+                    MarkerOptions()
+                        .position(LatLng(start.latitude, start.longitude))
+                        .icon(startMarkerIcon)
+                        .title("起点"),
+                )
+            }
             val track = uiState.trackPoints.map { LatLng(it.latitude, it.longitude) }
             if (track.size >= 2) {
                 overlays.add(
@@ -161,7 +159,7 @@ private fun createStartPointMarkerIcon(context: Context): BitmapDescriptor {
         style = Paint.Style.FILL
     }
     canvas.drawRoundRect(
-        RectF(0f, 0f, width.toFloat(), height.toFloat()),
+        android.graphics.RectF(0f, 0f, width.toFloat(), height.toFloat()),
         8 * density,
         8 * density,
         bgPaint,
