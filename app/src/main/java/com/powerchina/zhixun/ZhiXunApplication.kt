@@ -12,11 +12,14 @@ import com.powerchina.zhixun.location.BaiduSdkInitializer
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import com.powerchina.zhixun.xiaozhi.XiaozhiLifecycle
 import com.powerchina.zhixun.xiaozhi.XiaozhiMcpHandler
+import com.tencent.bugly.crashreport.CrashReport
 
 class ZhiXunApplication : Application(), CameraXConfig.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        // 第三参数 true：Logcat 输出详细日志，崩溃立即上报（Debug/Release 一致）
+        CrashReport.initCrashReport(applicationContext, BUGLY_APP_ID, true)
         BaiduSdkInitializer.ensureInitialized(this)
         PhysicalKeyLifecycle.register(this)
         Log.i(
@@ -34,5 +37,9 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         return CameraXConfig.Builder.fromConfig(Camera2Config.defaultConfig())
             .setMinimumLoggingLevel(Log.ERROR)
             .build()
+    }
+
+    companion object {
+        private const val BUGLY_APP_ID = "5f779d26af"
     }
 }
