@@ -48,6 +48,10 @@ class XiaozhiSessionManager private constructor(
     private val _awaitingActivation = MutableStateFlow(false)
     val awaitingActivation: StateFlow<Boolean> = _awaitingActivation.asStateFlow()
 
+    /** 用户主动断开后保持待机，直到唤醒/拍照/录音/手动连接再恢复 */
+    @Volatile
+    private var userStandbyDisconnected = false
+
     init {
         scope.launch {
             webSocketManager.events.collect { event ->
@@ -62,20 +66,7 @@ class XiaozhiSessionManager private constructor(
                         _isConnected.value = false
                         _isConnecting.value = false
                         XiaozhiVisionRegistry.clear()
-                        if (!webSocketManager.isAutoReconnectEnabled()) {
-                            Log.i(TAG, "WebSocket Disconnected，已禁止自动重连")
-                            return@collect
-                        }
-                        Log.i(TAG, "WebSocket Disconnected，尝试恢复连接")
-                        scope.launch {
-                            delay(2_500)
-                            if (!webSocketManager.isConnected() &&
-                                webSocketManager.isAutoReconnectEnabled() &&
-                                isNetworkConfigReady()
-                            ) {
-                                ensureConnected()
-                            }
-                        }
+                        Log.i(TAG, "WebSocket Disconnected，重连由业务层按场景决定")
                     }
                     is WebSocketEvent.Error -> {
                         _isConnecting.value = false
@@ -102,6 +93,7 @@ class XiaozhiSessionManager private constructor(
             old.otaUrl != newConfig.otaUrl
         ) {
             Log.i(TAG, "配置变更，重新连接")
+            clearUserStandbyDisconnect()
             disconnect()
             ensureConnected()
         }
@@ -109,8 +101,13 @@ class XiaozhiSessionManager private constructor(
 
     /**
      * 若未连接则执行 OTA（如需）并建立 WebSocket。可在应用启动、保存设置后调用。
+     * 用户主动断开后待机期间会自动跳过，除非 [clearUserStandbyDisconnect] 或显式 [connect]。
      */
     fun ensureConnected() {
+        if (userStandbyDisconnected) {
+            Log.d(TAG, "ensureConnected: 用户主动断开后待机，跳过")
+            return
+        }
         webSocketManager.enableReconnect()
         if (webSocketManager.isConnected()) {
             _isConnected.value = true
@@ -171,9 +168,10 @@ class XiaozhiSessionManager private constructor(
     }
 
     /**
-     * 待机黑屏休眠：断开 WebSocket 并禁止自动重连，亮屏/唤醒后再 [ensureConnected]。
+     * 用户主动断开：禁止自动重连，保留配置，待机直至用户再次唤醒/按键/手动连接。
      */
-    fun disconnectForStandbySleep() {
+    fun disconnectForUserStandby() {
+        userStandbyDisconnected = true
         webSocketManager.disableReconnect()
         webSocketManager.disconnect(
             disableAutoReconnect = true,
@@ -181,7 +179,40 @@ class XiaozhiSessionManager private constructor(
         )
         _isConnected.value = false
         _isConnecting.value = false
-        Log.i(TAG, "disconnectForStandbySleep: 已断开，等待亮屏重连")
+        Log.i(TAG, "disconnectForUserStandby: 已断开，唤醒待机不重连")
+    }
+
+    /** 连接已断开时，禁止后续自动重连并进入唤醒待机（服务端空闲断线等） */
+    fun suppressReconnectForWakeStandby() {
+        userStandbyDisconnected = true
+        webSocketManager.disableReconnect()
+        _isConnected.value = false
+        _isConnecting.value = false
+        Log.i(TAG, "suppressReconnectForWakeStandby: 唤醒待机，禁止自动重连")
+    }
+
+    fun isUserStandbyDisconnected(): Boolean = userStandbyDisconnected
+
+    /** 用户再次发起连接（唤醒、拍照、录音、手动连接）时调用 */
+    fun clearUserStandbyDisconnect() {
+        if (!userStandbyDisconnected) return
+        userStandbyDisconnected = false
+        Log.d(TAG, "clearUserStandbyDisconnect: 允许重新连接")
+    }
+
+    /**
+     * 待机黑屏休眠：断开 WebSocket 并禁止自动重连，亮屏后仍保持唤醒待机直至用户主动连接。
+     */
+    fun disconnectForStandbySleep() {
+        userStandbyDisconnected = true
+        webSocketManager.disableReconnect()
+        webSocketManager.disconnect(
+            disableAutoReconnect = true,
+            clearCredentials = false,
+        )
+        _isConnected.value = false
+        _isConnecting.value = false
+        Log.i(TAG, "disconnectForStandbySleep: 已断开，唤醒待机不重连")
     }
 
     /** 应用关闭：断开 WebSocket 并禁止自动重连 */

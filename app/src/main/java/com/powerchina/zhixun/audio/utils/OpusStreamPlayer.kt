@@ -158,7 +158,11 @@ class OpusStreamPlayer(
         
         // 请求音频焦点
         if (!requestAudioFocus()) {
-            Log.e(TAG, "无法获得音频焦点，播放可能会失败")
+            Log.w(TAG, "首次音频焦点请求失败，稍后重试")
+            Thread.sleep(80)
+            if (!requestAudioFocus()) {
+                Log.e(TAG, "无法获得音频焦点，播放可能会失败")
+            }
         }
         
         isPlaying = true

@@ -113,7 +113,9 @@ object XiaozhiWakeCoordinator {
         wakeScreen(appContext)
 
         val app = appContext as android.app.Application
-        XiaozhiSessionManager.getInstance(app).ensureConnected()
+        val session = XiaozhiSessionManager.getInstance(app)
+        session.clearUserStandbyDisconnect()
+        session.ensureConnected()
 
         if (PhysicalKeyInterceptor.isAppInForeground) {
             Log.i(TAG, "应用在前台，通过 AppEvents 打开对话")

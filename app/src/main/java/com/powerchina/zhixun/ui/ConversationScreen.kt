@@ -2,6 +2,7 @@ package com.powerchina.zhixun.ui
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -71,6 +72,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -93,6 +95,7 @@ import com.powerchina.zhixun.viewmodel.ConversationViewModel
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import java.io.File
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 private val ChatBg = Color(0xFFB8DFF5)
@@ -543,10 +546,13 @@ private fun ChatBubble(message: Message) {
     val alignment = if (isUser) Alignment.End else Alignment.Start
     val bubbleShape = RoundedCornerShape(10.dp)
     val imageShape = RoundedCornerShape(10.dp)
+    val density = LocalDensity.current
+    val maxImageWidthPx = with(density) { 220.dp.roundToPx() }
+    val maxImageHeightPx = maxImageWidthPx * 3 / 4
     var imageBitmap by remember(message.id, message.imagePath) {
         mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
     }
-    LaunchedEffect(message.imagePath) {
+    LaunchedEffect(message.imagePath, maxImageWidthPx) {
         val path = message.imagePath
         imageBitmap = if (path.isNullOrBlank()) {
             null
@@ -554,7 +560,7 @@ private fun ChatBubble(message: Message) {
             withContext(Dispatchers.IO) {
                 val file = File(path)
                 if (file.exists()) {
-                    BitmapFactory.decodeFile(path)?.asImageBitmap()
+                    decodeSampledBitmap(path, maxImageWidthPx, maxImageHeightPx)?.asImageBitmap()
                 } else {
                     null
                 }
@@ -606,4 +612,36 @@ private fun ChatBubble(message: Message) {
             }
         }
     }
+}
+
+/** 按 UI 显示尺寸采样解码，避免全分辨率 Bitmap OOM */
+private fun decodeSampledBitmap(path: String, maxWidthPx: Int, maxHeightPx: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    val sampleSize = calculateInSampleSize(
+        bounds.outWidth,
+        bounds.outHeight,
+        maxWidthPx,
+        maxHeightPx,
+    )
+    val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    return BitmapFactory.decodeFile(path, decodeOpts)
+}
+
+private fun calculateInSampleSize(
+    width: Int,
+    height: Int,
+    reqWidth: Int,
+    reqHeight: Int,
+): Int {
+    var inSampleSize = 1
+    if (height > reqHeight || width > reqWidth) {
+        var halfHeight = height / 2
+        var halfWidth = width / 2
+        while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+            inSampleSize *= 2
+        }
+    }
+    return inSampleSize
 }

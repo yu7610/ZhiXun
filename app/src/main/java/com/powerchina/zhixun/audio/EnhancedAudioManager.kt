@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 音频事件
@@ -62,6 +64,7 @@ class EnhancedAudioManager(private val context: Context) {
     )
     private var playbackJob: Job? = null
     private var isPlaybackSetup = false
+    private val playbackMutex = Mutex()
 
     /**
      * 初始化音频系统
@@ -349,26 +352,45 @@ class EnhancedAudioManager(private val context: Context) {
     fun playAudio(audioData: ByteArray) {
         scope.launch {
             try {
-                // 确保播放器已经启动
-                if (!isPlayingState) {
-                    isPlayingState = true
-                    Log.d(TAG, "首次播放音频，设置播放流")
-                    setupAudioPlayback()
+                playbackMutex.withLock {
+                    ensurePlaybackPipelineReady()
+                    var waited = 0
+                    while (_audioPlaybackFlow.subscriptionCount.value == 0 && waited < 1_000) {
+                        delay(10)
+                        waited += 10
+                    }
+                    if (_audioPlaybackFlow.subscriptionCount.value == 0) {
+                        Log.w(TAG, "播放收集器未就绪，重建下行管线")
+                        reprepareDownlinkPlayback()
+                        waited = 0
+                        while (_audioPlaybackFlow.subscriptionCount.value == 0 && waited < 1_000) {
+                            delay(10)
+                            waited += 10
+                        }
+                    }
+                    _audioPlaybackFlow.emit(audioData)
+                    Log.d(TAG, "发送音频数据到播放流，长度: ${audioData.size}")
                 }
-
-                // 播放收集器是异步订阅的：首帧若早于订阅，SharedFlow 会直接丢弃，
-                // 导致「设备在回复却没声音/丢开头」。这里短暂等待收集器就绪再发。
-                var waited = 0
-                while (_audioPlaybackFlow.subscriptionCount.value == 0 && waited < 500) {
-                    delay(10)
-                    waited += 10
-                }
-
-                // 直接发送到播放流
-                _audioPlaybackFlow.emit(audioData)
-                Log.d(TAG, "发送音频数据到播放流，长度: ${audioData.size}")
             } catch (e: Exception) {
                 Log.e(TAG, "播放音频失败", e)
+            }
+        }
+    }
+
+    private fun ensurePlaybackPipelineReady() {
+        if (isPlaybackSetup && isPlayingState) return
+        isPlayingState = true
+        if (!isPlaybackSetup) {
+            if (streamPlayer != null && opusDecoder != null) {
+                reprepareDownlinkPlayback()
+            } else {
+                if (opusDecoder == null) {
+                    opusDecoder = OpusDecoder(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS)
+                }
+                if (streamPlayer == null) {
+                    streamPlayer = OpusStreamPlayer(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS, context)
+                }
+                setupAudioPlayback()
             }
         }
     }

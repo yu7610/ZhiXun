@@ -66,6 +66,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                 if (conversationViewModel.needsConfigRefresh(cfg)) {
                     conversationViewModel.updateConfig(cfg)
                 }
+                sessionManager.clearUserStandbyDisconnect()
                 sessionManager.ensureConnected()
                 if (navController.currentDestination?.route != AppRoutes.Conversation) {
                     navController.navigate(AppRoutes.Conversation) {
@@ -91,15 +92,20 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                 } else {
                     when {
                         req.startVoiceOnConnect -> {
+                            sessionManager.clearUserStandbyDisconnect()
                             sessionManager.ensureConnected()
                             conversationViewModel.onRecordKeyPressed()
                         }
                         req.fromVoiceWake -> {
                             conversationViewModel.updateConfig(cfg)
+                            sessionManager.clearUserStandbyDisconnect()
                             sessionManager.ensureConnected()
                             conversationViewModel.onVoiceWakeDetected()
                         }
-                        req.autoConnect -> sessionManager.ensureConnected()
+                        req.autoConnect -> {
+                            sessionManager.clearUserStandbyDisconnect()
+                            sessionManager.ensureConnected()
+                        }
                     }
                     if (navController.currentDestination?.route != AppRoutes.Conversation) {
                         Log.d(TAG, "导航到对话页")
@@ -151,6 +157,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                             configManager.saveConfig(newConfig)
                             editedConfig = newConfig
                             conversationViewModel.updateConfig(newConfig)
+                            sessionManager.clearUserStandbyDisconnect()
                             sessionManager.ensureConnected()
                             if (newConfig.otaUrl.isNotBlank() || newConfig.websocketUrl.isNotBlank()) {
                                 if (navController.previousBackStackEntry != null) {

@@ -29,12 +29,16 @@ import com.powerchina.zhixun.xiaozhi.wake.WakePhraseMatcher
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -46,6 +50,12 @@ enum class ConversationState {
     LISTENING,      // 聆听中
     PROCESSING,     // 处理中
     SPEAKING        // 说话中
+}
+
+/** WebSocket 文本/音频消息统一排队，保证 TTS 控制信令先于音频帧处理 */
+private sealed class WsConversationPayload {
+    data class Text(val message: String) : WsConversationPayload()
+    data class Binary(val data: ByteArray) : WsConversationPayload()
 }
 
 /**
@@ -69,6 +79,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         private const val WAKE_GREETING_SUPPRESS_MS = 30_000L
         /** 待机时唤醒连接被空闲关闭后的快速重连宽限期，期间 UI 维持「待机」 */
         private const val STANDBY_RECONNECT_GRACE_MS = 6_000L
+        /** 聊天消息列表上限，避免长会话 OOM */
+        private const val MAX_MESSAGES = 100
+        /** 待机拍照键等待连接/页面就绪的最大重试次数 */
+        private const val MAX_PHOTO_KEY_RETRIES = 20
         /** 服务端 listen 会话约 30s 超时，对话聆听中需 stop+start 续期（与 WakeSTT 一致） */
 
         private val ASSISTANT_TOOL_MARKER = Regex(
@@ -195,7 +209,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private var pendingRecordKeyStart = false
     /** 待机拍照键：连接/页面就绪后补发 detect */
     private var pendingPhotoFromStandby = false
+    private var pendingPhotoRetryCount = 0
     private var pendingPhotoRetryJob: Job? = null
+    /** 文本消息在后台单线程顺序处理，避免 Gson 解析阻塞主线程 */
+    private val textMessageDispatcher = Dispatchers.Default.limitedParallelism(1)
+    private val wsConversationChannel = Channel<WsConversationPayload>(capacity = Channel.BUFFERED)
     private var pendingRecordKeyRetryJob: Job? = null
     private var pendingRecordKeyRetryCount = 0
 
@@ -248,6 +266,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     init {
         startEventListening()
+        startWsConversationProcessor()
         viewModelScope.launch {
             sessionManager.isConnected.collect { connected ->
                 _isConnected.value = connected
@@ -313,9 +332,15 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             _state.value == ConversationState.LISTENING
     }
 
+    private fun markPendingPhotoFromStandby() {
+        pendingPhotoFromStandby = true
+        pendingPhotoRetryCount = 0
+    }
+
     private fun cancelPendingPhotoKey(reason: String) {
         if (!pendingPhotoFromStandby && pendingPhotoRetryJob?.isActive != true) return
         pendingPhotoFromStandby = false
+        pendingPhotoRetryCount = 0
         pendingPhotoRetryJob?.cancel()
         Log.d(PhotoKeyLog.TAG, "取消待处理拍照: $reason")
     }
@@ -875,7 +900,15 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         val blockers = mutableListOf<String>()
         if (!conversationUiActive) blockers.add("uiInactive")
         if (sessionManager.isConnecting.value) blockers.add("sessionConnecting")
-        if (!_isConnected.value) blockers.add("disconnected")
+        if (!_isConnected.value) {
+            if (sessionManager.isUserStandbyDisconnected()) {
+                if (!XiaozhiWakeForegroundService.isWakeListeningHealthy()) {
+                    blockers.add("wakeNotHealthy")
+                }
+            } else {
+                blockers.add("disconnected")
+            }
+        }
         if (_isAwaitingReconnect.value) blockers.add("awaitingReconnect")
         if (_state.value != ConversationState.IDLE) blockers.add("state=${_state.value}")
         if (pendingVoiceWake) blockers.add("pendingWake")
@@ -1222,6 +1255,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * - 处理/说话 → 打断当前回复，重新进入聆听
      */
     fun onRecordKeyPressed() {
+        sessionManager.clearUserStandbyDisconnect()
         _isSessionEndStandby.value = false
         val current = _state.value
         when (current) {
@@ -1259,6 +1293,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * - 聆听 → 发送「拍照」文字给服务器，由服务端调 MCP take_photo
      */
     fun onPhotoKeyPressed() {
+        sessionManager.clearUserStandbyDisconnect()
         if (!XiaozhiAppEvents.consumePhotoKeyPressEvent()) {
             Log.d(PhotoKeyLog.TAG, "拍照键：重复事件忽略")
             return
@@ -1273,7 +1308,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
         if (!conversationUiActive) {
             Log.d(PhotoKeyLog.TAG, "拍照键：对话页未就绪，待页面就绪后发送「拍照」")
-            pendingPhotoFromStandby = true
+            markPendingPhotoFromStandby()
             if (!_isConnected.value) connect()
             schedulePhotoKeyRetry()
             return
@@ -1347,9 +1382,15 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private fun schedulePhotoKeyRetry() {
         if (!pendingPhotoFromStandby) return
+        if (pendingPhotoRetryCount >= MAX_PHOTO_KEY_RETRIES) {
+            Log.w(PhotoKeyLog.TAG, "拍照键：多次重试失败（$MAX_PHOTO_KEY_RETRIES 次）")
+            cancelPendingPhotoKey("重试次数用尽")
+            return
+        }
         if (pendingPhotoRetryJob?.isActive == true) return
+        pendingPhotoRetryCount++
         pendingPhotoRetryJob = viewModelScope.launch {
-            delay(300)
+            delay(300L * pendingPhotoRetryCount)
             tryHandlePendingPhotoKey()
         }
     }
@@ -1366,7 +1407,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             Log.d(PhotoKeyLog.TAG, "待机拍照：交接/结束语中，忽略")
             return
         }
-        pendingPhotoFromStandby = true
+        markPendingPhotoFromStandby()
         if (!_isConnected.value) {
             connect()
             Log.d(PhotoKeyLog.TAG, "待机拍照：等待 WebSocket 连接")
@@ -1376,7 +1417,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private fun executePhotoWakeDetect() {
         if (!_isConnected.value) {
-            pendingPhotoFromStandby = true
+            markPendingPhotoFromStandby()
             schedulePhotoKeyRetry()
             return
         }
@@ -1405,7 +1446,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun sendPhotoTextInConversation() {
         if (!_isConnected.value) {
             Log.d(PhotoKeyLog.TAG, "聆听拍照：未连接")
-            pendingPhotoFromStandby = true
+            markPendingPhotoFromStandby()
             connect()
             schedulePhotoKeyRetry()
             return
@@ -1550,6 +1591,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * 检测到「你好，智询」后：连接小智并进入自动对话。
      */
     fun onVoiceWakeDetected() {
+        sessionManager.clearUserStandbyDisconnect()
         Log.i(TAG, "onVoiceWakeDetected 关键词=${WakePhraseMatcher.WAKE_PHRASE}")
         logFlow("wake.detected", "关键词=${WakePhraseMatcher.WAKE_PHRASE}")
         abortPhotoSessionForVoiceInput("voice_wake")
@@ -1853,12 +1895,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         updateStandbyReady()
     }
 
-    /** 亮屏/触摸恢复亮度后重新连接小智 */
+    /** 亮屏/触摸恢复亮度：保持唤醒待机，不自动重连 WebSocket */
     fun onStandbyScreenWake(fromSleep: Boolean) {
         if (!_isStandbyScreenSleep.value) return
-        Log.i(TAG, "亮屏恢复：重新连接小智 fromSleep=$fromSleep")
-        VoiceFlowLog.snapshot("standby.wake", "reconnect fromSleep=$fromSleep")
-        beginStandbySleepReconnect()
+        Log.i(TAG, "亮屏恢复：保持唤醒待机，不重连 fromSleep=$fromSleep")
+        VoiceFlowLog.snapshot("standby.wake", "wakeStandbyNoReconnect fromSleep=$fromSleep")
+        clearStandbyScreenSleep("screen_wake")
+        prepareStandbyWakeListening()
+        updateStandbyReady()
     }
 
     private fun isStandbySleepEligible(): Boolean {
@@ -1872,31 +1916,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                     _isSessionEndStandby.value ||
                     _isAwaitingReconnect.value
             else -> false
-        }
-    }
-
-    private fun beginStandbySleepReconnect() {
-        standbyReconnectGraceJob?.cancel()
-        _isAwaitingReconnect.value = true
-        _isStandbyReconnecting.value = true
-        sessionManager.ensureConnected()
-        scheduleStandbyReconnectGrace()
-        updateStandbyReady()
-        scheduleStandbyReadyPoll()
-    }
-
-    private fun scheduleStandbyReconnectGrace() {
-        standbyReconnectGraceJob?.cancel()
-        standbyReconnectGraceJob = viewModelScope.launch {
-            delay(STANDBY_RECONNECT_GRACE_MS)
-            if (!_isConnected.value) {
-                _isStandbyReconnecting.value = false
-                _isStandbyReady.value = false
-                if (_state.value == ConversationState.IDLE) {
-                    transitionState(ConversationState.CONNECTING, "standby_wake_reconnect_slow")
-                }
-                updateStandbyReady()
-            }
         }
     }
 
@@ -1921,13 +1940,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         sessionEndFallbackJob = viewModelScope.launch {
             delay(20_000)
             if (!pendingSessionEnd) return@launch
-            Log.w(TAG, "结束语等待超时，强制断开重连")
-            Log.w(SESSION_END_TAG, "20s 内未收到完整结束语，强制断开重连")
+            Log.w(TAG, "结束语等待超时，强制进入唤醒待机")
+            Log.w(SESSION_END_TAG, "20s 内未收到完整结束语，强制进入唤醒待机")
             scheduleSessionEndCompletion("session_end_timeout")
         }
     }
 
-    /** 结束语 tts stop 后等待 AudioTrack 播完，再关闭任务并断开重连 */
+    /** 结束语 tts stop 后等待 AudioTrack 播完，再关闭任务并进入唤醒待机（不重连） */
     private fun scheduleSessionEndCompletion(trigger: String) {
         if (sessionEndStandbyJob?.isActive == true) return
         sessionEndStandbyJob = viewModelScope.launch {
@@ -1936,7 +1955,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             Log.i(SESSION_END_TAG, "等待结束语播完 trigger=$trigger")
             awaitSessionEndPlayback()
             if (!pendingSessionEnd && trigger != "session_end_timeout") return@launch
-            finalizeSessionEndAndReconnect(trigger)
+            finalizeSessionEndAndStandby(trigger)
         }
     }
 
@@ -1969,11 +1988,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
             delay(50)
         }
-        Log.w(TAG, "结束语播放等待超时，仍执行断开重连")
+        Log.w(TAG, "结束语播放等待超时，仍进入唤醒待机")
     }
 
-    /** 关闭对话相关任务，断开 WebSocket 并立即重连，恢复唤醒待机 */
-    private fun finalizeSessionEndAndReconnect(trigger: String) {
+    /** 关闭对话相关任务，断开 WebSocket，进入唤醒待机（不重连） */
+    private fun finalizeSessionEndAndStandby(trigger: String) {
         shutdownAllConversationTasks()
         pendingSessionEnd = false
         sessionEndAudioReceived = false
@@ -1984,22 +2003,25 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         isAudioInitialized = false
         XiaozhiWakeForegroundService.releaseConversationMicrophoneClaim(getApplication())
         clearWakeConversationHandoff("session_end")
-        transitionState(ConversationState.IDLE, "session_end:$trigger")
-        Log.i(TAG, "结束语完成($trigger) → 关闭任务并断开重连")
-        Log.i(SESSION_END_TAG, "结束语播完，断开 WebSocket 并重连")
-        logFlow("sessionEnd.complete", "trigger=$trigger")
-        // 退下收尾的断开重连属内部动作，UI 直接显示「待机」，不露出「连接中」
-        _isSessionEndStandby.value = true
-        viewModelScope.launch {
-            delay(8_000)
-            _isSessionEndStandby.value = false
-        }
-        sessionManager.disconnect()
-        sessionEndReconnectPending = true
-        _isAwaitingReconnect.value = true
-        transitionState(ConversationState.CONNECTING, "session_end_reconnect")
-        sessionManager.ensureConnected()
+        Log.i(TAG, "结束语完成($trigger) → 唤醒待机，不重连")
+        Log.i(SESSION_END_TAG, "结束语播完，断开 WebSocket，进入唤醒待机")
+        logFlow("sessionEnd.complete", "trigger=$trigger wakeStandbyNoReconnect")
+        sessionManager.disconnectForUserStandby()
+        _isAwaitingReconnect.value = false
+        _isStandbyReconnecting.value = false
+        _isSessionEndStandby.value = false
+        sessionEndReconnectPending = false
+        enterStandby("session_end:$trigger", notifyServer = false)
         sessionEndStandbyJob = null
+    }
+
+    private fun enterWakeStandbyWithoutReconnect(reason: String) {
+        sessionManager.suppressReconnectForWakeStandby()
+        _isAwaitingReconnect.value = false
+        _isStandbyReconnecting.value = false
+        standbyReconnectGraceJob?.cancel()
+        sessionEndReconnectPending = false
+        enterStandby(reason, notifyServer = false)
     }
 
     private fun shutdownAllConversationTasks() {
@@ -2393,6 +2415,29 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /** 顺序处理 TTS 文本信令与下行音频，避免音频早于 tts start 被丢弃 */
+    private fun startWsConversationProcessor() {
+        viewModelScope.launch(textMessageDispatcher) {
+            for (payload in wsConversationChannel) {
+                try {
+                    when (payload) {
+                        is WsConversationPayload.Text -> handleTextMessage(payload.message)
+                        is WsConversationPayload.Binary -> handleBinaryMessage(payload.data)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "处理 WS 对话消息失败", e)
+                }
+            }
+        }
+    }
+
+    private fun enqueueWsConversationPayload(payload: WsConversationPayload) {
+        val result = wsConversationChannel.trySend(payload)
+        if (result.isFailure) {
+            Log.w(TAG, "WS 对话消息队列已满，丢弃 type=${payload::class.simpleName}")
+        }
+    }
+
     /**
      * 用户确认激活后连接 WebSocket
      */
@@ -2412,6 +2457,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * 连接到服务器（若后台已连接则直接复用）
      */
     fun connect() {
+        sessionManager.clearUserStandbyDisconnect()
         sessionManager.reloadConfig()
         config = configManager.loadConfig()
         if (sessionManager.isConnected.value) {
@@ -2475,14 +2521,6 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 if (_state.value == ConversationState.CONNECTING) {
                     _state.value = ConversationState.IDLE
                 }
-                if (sessionEndReconnectPending) {
-                    sessionEndReconnectPending = false
-                    _isSessionEndStandby.value = false
-                    Log.i(TAG, "退下重连完成 → 恢复唤醒待机")
-                    logFlow("sessionEnd.reconnected", "session=${webSocketManager.getSessionId()}")
-                    prepareStandbyWakeListening()
-                    return
-                }
                 if (_state.value == ConversationState.CONNECTING) {
                     _state.value = ConversationState.IDLE
                 }
@@ -2518,6 +2556,29 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 }
                 audioManager.releaseRecorderOnly()
                 isAudioInitialized = false
+                if (!webSocketManager.isAutoReconnectEnabled()) {
+                    _isAwaitingReconnect.value = false
+                    _isStandbyReconnecting.value = false
+                    standbyReconnectGraceJob?.cancel()
+                    sessionEndReconnectPending = false
+                    when {
+                        pendingSessionEnd &&
+                            (_state.value == ConversationState.SPEAKING ||
+                                _state.value == ConversationState.PROCESSING) -> {
+                            Log.i(TAG, "主动断连，等待结束语播完再待机")
+                        }
+                        _isStandbyScreenSleep.value -> {
+                            Log.i(TAG, "待机休眠主动断连，保持唤醒待机")
+                            prepareStandbyWakeListening()
+                            updateStandbyReady()
+                        }
+                        else -> {
+                            Log.i(TAG, "主动断连 → 唤醒待机，不重连")
+                            enterWakeStandbyWithoutReconnect("active_disconnect")
+                        }
+                    }
+                    return
+                }
                 if (keepRecordKeyFlow) {
                     isAutoMode = true
                     _state.value = ConversationState.CONNECTING
@@ -2528,26 +2589,16 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 } else if (shouldReconnectAfterConversationDisconnect()) {
                     beginWsReconnectAfterConversationDisconnect()
                 } else if (_isStandbyScreenSleep.value) {
-                    Log.i(TAG, "待机休眠断连，保留唤醒，等待亮屏重连")
+                    Log.i(TAG, "待机休眠断连，保持唤醒待机")
                     prepareStandbyWakeListening()
                     updateStandbyReady()
-                } else if (_state.value == ConversationState.IDLE &&
-                    webSocketManager.isAutoReconnectEnabled()
-                ) {
-                    _isAwaitingReconnect.value = true
-                    _isStandbyReady.value = false
-                    // 待机时唤醒连接常被服务端空闲关闭、随即快速重连。
-                    // 宽限期内 UI 维持「待机」（不切 CONNECTING、不闪「连接中」）；
-                    // 超过宽限仍未连上，才显示「连接中」。
-                    _isStandbyReconnecting.value = true
-                    scheduleStandbyReconnectGrace()
-                    Log.i(TAG, "WS 断开 → 待机快速重连宽限中（UI 维持待机）")
+                } else if (_state.value == ConversationState.IDLE) {
+                    Log.i(TAG, "服务端空闲断线 → 唤醒待机，不重连")
                     VoiceFlowLog.warn(
                         "ws.disconnected",
-                        "待机中断连，宽限重连 | blockers=${standbyReadyBlockers().joinToString(",")}",
+                        "空闲断线，唤醒待机不重连 | blockers=${standbyReadyBlockers().joinToString(",")}",
                     )
-                    updateStandbyReady()
-                    scheduleStandbyReadyPoll()
+                    enterWakeStandbyWithoutReconnect("idle_disconnect")
                 } else {
                     _isAwaitingReconnect.value = false
                     enterStandby("ws_disconnect", notifyServer = false)
@@ -2555,11 +2606,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
 
             is WebSocketEvent.TextMessage -> {
-                handleTextMessage(event.message)
+                enqueueWsConversationPayload(WsConversationPayload.Text(event.message))
             }
 
             is WebSocketEvent.BinaryMessage -> {
-                handleBinaryMessage(event.data)
+                enqueueWsConversationPayload(WsConversationPayload.Binary(event.data))
             }
             
             is WebSocketEvent.MCPMessage -> Unit
@@ -2962,6 +3013,26 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /** 音频帧可能早于 tts start 到达，提前切换到可播放状态 */
+    private fun prepareForDownlinkAudio() {
+        when (_state.value) {
+            ConversationState.LISTENING -> {
+                if (isAutoMode && !isWakeGreetingTurn()) {
+                    audioManager.stopRecording()
+                    transitionState(ConversationState.SPEAKING, "binary_leads_tts")
+                    scheduleSpeakingWatchdog()
+                }
+            }
+            ConversationState.PROCESSING -> {
+                if (!pendingSessionEnd) {
+                    transitionState(ConversationState.SPEAKING, "binary_leads_tts")
+                    scheduleSpeakingWatchdog()
+                }
+            }
+            else -> Unit
+        }
+    }
+
     /**
      * 处理二进制消息（音频数据）
      */
@@ -2973,6 +3044,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
         }
         if (!conversationUiActive || shouldIgnoreConversationServerMessages()) return
+        prepareForDownlinkAudio()
         if (!shouldPlayDownlinkAudio()) {
             VoiceFlowLog.step(
                 "msg.binary",
@@ -3294,11 +3366,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      */
     fun disconnect() {
         Log.i(TAG, "用户主动断开连接")
-        audioManager.stopRecording()
-        audioManager.stopPlaying()
-        sessionManager.shutdown()
-        _state.value = ConversationState.IDLE
-        isAutoMode = false
+        sessionManager.disconnectForUserStandby()
+        enterStandby("user_disconnect", notifyServer = false)
     }
 
     /**
@@ -3385,7 +3454,12 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
      * 添加消息到列表
      */
     private fun addMessage(message: Message) {
-        _messages.value = _messages.value + message
+        val updated = _messages.value + message
+        _messages.value = if (updated.size > MAX_MESSAGES) {
+            updated.takeLast(MAX_MESSAGES)
+        } else {
+            updated
+        }
     }
 
     /**
