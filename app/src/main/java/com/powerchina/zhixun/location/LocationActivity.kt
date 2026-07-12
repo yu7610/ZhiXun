@@ -15,7 +15,7 @@ class LocationActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        BaiduSdkInitializer.ensureInitialized(application)
+        LocationBootstrap.startLocationIfPermitted(this)
         enableEdgeToEdge()
         ScreenOnHelper.attach(this)
         XiaozhiWakeForegroundService.ensureStarted(this)

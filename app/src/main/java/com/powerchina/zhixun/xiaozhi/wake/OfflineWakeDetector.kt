@@ -20,6 +20,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 离线语音唤醒：本地用 sherpa-onnx KWS 检测「你好，智询」，待机时不连服务器、不上传音频。
@@ -46,73 +47,37 @@ class OfflineWakeDetector(
             Class.forName("com.k2fsa.sherpa.onnx.KeywordSpotter")
             true
         }.getOrDefault(false)
-    }
 
-    private val appContext = context.applicationContext
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val prewarmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        @Volatile
+        private var cachedSpotter: KeywordSpotter? = null
+        private val spotterLock = Any()
 
-    @Volatile
-    private var active = false
-    override val isActive: Boolean get() = active
-    override val isStreaming: Boolean get() = active
-
-    private var loopJob: Job? = null
-    private var spotter: KeywordSpotter? = null
-    private var stream: OnlineStream? = null
-    private var audioRecord: AudioRecord? = null
-    private var recordEffects: AudioRecordEffects? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var lastWakeAtMs = 0L
-
-    override fun start() {
-        if (active) {
-            Log.d(TAG, "已在运行，跳过 start")
-            return
+        /** 应用启动后在后台预加载 KWS 模型，避免首次进主界面 ANR */
+        fun prewarm(context: Context) {
+            if (!isAvailable()) return
+            prewarmScope.launch {
+                obtainSharedSpotter(context.applicationContext)
+            }
         }
-        if (!ensureSpotter()) {
-            Log.e(TAG, "KWS 初始化失败")
-            return
-        }
-        active = true
-        acquireWakeLock()
-        Log.i(TAG, "启动离线唤醒，关键词=${WakePhraseMatcher.WAKE_PHRASE}")
-        VoiceFlowLog.snapshot("wakeKWS.start", "keyword=${WakePhraseMatcher.WAKE_PHRASE}")
-        loopJob?.cancel()
-        loopJob = scope.launch { detectLoop() }
-    }
 
-    override fun pause() {
-        if (!active) return
-        Log.d(TAG, "暂停离线唤醒")
-        VoiceFlowLog.step("wakeKWS.pause", "")
-        active = false
-        loopJob?.cancel()
-        loopJob = null
-        stopAudio()
-    }
-
-    override fun stop() {
-        Log.d(TAG, "停止离线唤醒")
-        active = false
-        loopJob?.cancel()
-        loopJob = null
-        stopAudio()
-        releaseWakeLock()
-        try {
-            stream?.release()
-        } catch (_: Exception) {
+        private fun obtainSharedSpotter(context: Context): KeywordSpotter? {
+            cachedSpotter?.let { return it }
+            synchronized(spotterLock) {
+                cachedSpotter?.let { return it }
+                return try {
+                    buildSpotter(context).also {
+                        cachedSpotter = it
+                        Log.i(TAG, "KWS 模型预加载完成")
+                    }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "KWS 模型预加载失败", e)
+                    null
+                }
+            }
         }
-        stream = null
-        try {
-            spotter?.release()
-        } catch (_: Exception) {
-        }
-        spotter = null
-    }
 
-    private fun ensureSpotter(): Boolean {
-        if (spotter != null) return true
-        return try {
+        private fun buildSpotter(context: Context): KeywordSpotter {
             val config = KeywordSpotterConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
                 modelConfig = OnlineModelConfig(
@@ -130,13 +95,110 @@ class OfflineWakeDetector(
                 keywordsScore = 2.0f,
                 keywordsThreshold = 0.25f,
             )
-            spotter = KeywordSpotter(assetManager = appContext.assets, config = config)
-            Log.i(TAG, "KWS 模型加载完成")
-            true
-        } catch (e: Throwable) {
-            Log.e(TAG, "KWS 模型/库加载失败", e)
-            spotter = null
-            false
+            return KeywordSpotter(assetManager = context.assets, config = config)
+        }
+    }
+
+    private val appContext = context.applicationContext
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var active = false
+    @Volatile
+    private var starting = false
+    override val isActive: Boolean get() = active
+    override val isStarting: Boolean get() = starting
+    override val isStreaming: Boolean get() = active && !starting
+
+    private var loopJob: Job? = null
+    private var spotter: KeywordSpotter? = null
+    private var stream: OnlineStream? = null
+    private var audioRecord: AudioRecord? = null
+    private var recordEffects: AudioRecordEffects? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var lastWakeAtMs = 0L
+
+    override fun start() {
+        if (active || starting) {
+            Log.d(TAG, "已在运行或启动中，跳过 start")
+            return
+        }
+        starting = true
+        loopJob?.cancel()
+        loopJob = scope.launch {
+            try {
+                if (!ensureSpotter()) {
+                    Log.e(TAG, "KWS 初始化失败")
+                    return@launch
+                }
+                active = true
+                acquireWakeLock()
+                Log.i(TAG, "启动离线唤醒，关键词=${WakePhraseMatcher.WAKE_PHRASE}")
+                VoiceFlowLog.snapshot("wakeKWS.start", "keyword=${WakePhraseMatcher.WAKE_PHRASE}")
+                detectLoop()
+            } finally {
+                starting = false
+            }
+        }
+    }
+
+    override fun pause() {
+        if (!active && !starting) return
+        Log.d(TAG, "暂停离线唤醒")
+        VoiceFlowLog.step("wakeKWS.pause", "")
+        starting = false
+        active = false
+        loopJob?.cancel()
+        loopJob = null
+        stopAudio()
+    }
+
+    override fun stop() {
+        Log.d(TAG, "停止离线唤醒")
+        starting = false
+        active = false
+        loopJob?.cancel()
+        loopJob = null
+        stopAudio()
+        releaseWakeLock()
+        try {
+            stream?.release()
+        } catch (_: Exception) {
+        }
+        stream = null
+        val current = spotter
+        spotter = null
+        if (current != null && current !== cachedSpotter) {
+            try {
+                current.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private suspend fun ensureSpotter(): Boolean {
+        if (spotter != null) return true
+        return withContext(Dispatchers.IO) {
+            if (spotter != null) return@withContext true
+            val shared = obtainSharedSpotter(appContext)
+            if (shared != null) {
+                spotter = shared
+                Log.i(TAG, "KWS 模型就绪")
+                return@withContext true
+            }
+            try {
+                spotter = buildSpotter(appContext).also {
+                    synchronized(spotterLock) {
+                        if (cachedSpotter == null) cachedSpotter = it
+                    }
+                }
+                Log.i(TAG, "KWS 模型加载完成")
+                true
+            } catch (e: Throwable) {
+                Log.e(TAG, "KWS 模型/库加载失败", e)
+                spotter = null
+                false
+            }
         }
     }
 

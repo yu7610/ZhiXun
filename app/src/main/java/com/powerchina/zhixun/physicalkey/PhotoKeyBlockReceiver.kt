@@ -25,9 +25,10 @@ class PhotoKeyBlockReceiver : BroadcastReceiver() {
         if (isOrderedBroadcast) {
             abortBroadcast()
         }
-        // 相机预热改到 MCP take_photo 前，避免与上一轮会话争用相机导致主线程 ANR
-        // PRESS_PIC_KEY（抬起）仅阻断系统相机；拍照在 DOWN 广播或 KeyEvent 已触发
-        if (action != VideoKeyReceiver.ACTION_PRESS_PIC_KEY) {
+        // 前台由 PhysicalKeyInterceptor 的 KeyEvent 触发；后台/息屏走广播（仅 DOWN）
+        if (!PhysicalKeyInterceptor.isAppInForeground &&
+            action != VideoKeyReceiver.ACTION_PRESS_PIC_KEY
+        ) {
             VideoKeyHandler.requestServerPhoto(context.applicationContext)
         }
     }

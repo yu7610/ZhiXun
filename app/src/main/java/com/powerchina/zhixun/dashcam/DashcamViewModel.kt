@@ -97,6 +97,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private val frameCaptureInProgress = AtomicBoolean(false)
     private val photoCaptureInProgress = AtomicBoolean(false)
     private val recordingStartInProgress = AtomicBoolean(false)
+    private var recordingStartTimeoutJob: Job? = null
     private var hasAutoStarted = false
     private var userStoppedRecording = false
     private var pendingPhotoAfterStop = false
@@ -112,7 +113,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private fun releaseCameraForBackground() {
         if (_isRecording.value) {
             Log.i(TAG, "执法仪进入后台，停止录像以释放相机")
-            stopRecordingIfActive()
+            stopRecording(markUserStopped = false)
         }
         bindCameraSession(null)
     }
@@ -122,6 +123,10 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         SharedCameraCapture.dashcamSession = session
         if (session != null) {
             McpCameraHolder.pauseForDashcam()
+            recordingStartInProgress.set(false)
+            if (_photoFollowUpMode.value != PhotoFollowUpMode.VoiceNote) {
+                userStoppedRecording = false
+            }
             if (_isRecording.value && !session.recordingController.isRecording) {
                 Log.w(TAG, "相机重绑导致录像中断，重置状态")
                 _isRecording.value = false
@@ -464,9 +469,11 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
         if (controller.isRecording || _isRecording.value) return
         if (!recordingStartInProgress.compareAndSet(false, true)) return
+        scheduleRecordingStartTimeout()
         val request = runCatching {
             DashcamRecordingStore.createVideoOutputRequest(app)
         }.getOrElse { err ->
+            cancelRecordingStartTimeout()
             recordingStartInProgress.set(false)
             Log.e(TAG, "创建录像输出失败", err)
             showMessage(err.message ?: "无法创建录像文件")
@@ -475,6 +482,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         val started = controller.startRecording(
             request = request,
             onStarted = {
+                cancelRecordingStartTimeout()
                 recordingStartInProgress.set(false)
                 _isRecording.value = true
                 _elapsedSeconds.value = 0
@@ -482,6 +490,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 startFrameUploadLoop()
             },
             onError = { err ->
+                cancelRecordingStartTimeout()
                 recordingStartInProgress.set(false)
                 _isRecording.value = false
                 stopTimer()
@@ -490,9 +499,26 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             },
         )
         if (!started) {
+            cancelRecordingStartTimeout()
             recordingStartInProgress.set(false)
             showMessage("录像未启动：${request.displayName}")
         }
+    }
+
+    private fun scheduleRecordingStartTimeout() {
+        recordingStartTimeoutJob?.cancel()
+        recordingStartTimeoutJob = viewModelScope.launch {
+            delay(8_000)
+            if (recordingStartInProgress.get() && !_isRecording.value) {
+                recordingStartInProgress.set(false)
+                showMessage("录像启动超时，请重试")
+            }
+        }
+    }
+
+    private fun cancelRecordingStartTimeout() {
+        recordingStartTimeoutJob?.cancel()
+        recordingStartTimeoutJob = null
     }
 
     private fun stopRecording(markUserStopped: Boolean = true) {
@@ -661,6 +687,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         DashcamForeground.setActive(false)
         SharedCameraCapture.dashcamSession = null
         stopFrameUploadLoop()
+        cancelRecordingStartTimeout()
         compressJob?.cancel()
         RecordingFrameTts.shutdown()
         localVoiceRecognizer?.destroy()

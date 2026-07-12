@@ -1,0 +1,8 @@
+## 复制为 local.properties 后填写（local.properties 不会提交到 Git）
+## baiduMapAk 也可写在 gradle.properties（见项目内注释）
+
+sdk.dir=/path/to/Android/sdk
+
+# 百度地图/定位 AK，在 https://lbsyun.baidu.com/apiconsole/key 申请
+# 应用类型选「Android SDK」，包名填 com.powerchina.zhixun，并填写签名 SHA1
+baiduMapAk=你的百度地图AK

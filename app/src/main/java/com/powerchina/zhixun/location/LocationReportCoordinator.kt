@@ -32,19 +32,20 @@ object LocationReportCoordinator {
             Log.i(TAG, "无定位权限，跳过上报")
             return
         }
-        BaiduLocationReporter.start(context.applicationContext)
-        if (started) return
-        started = true
-        lastReportTimeMs = 0L
-        val appContext = context.applicationContext
-        val listener: (BDLocation) -> Unit = { location ->
-            scope.launch {
-                uploadLocation(appContext, location)
+        if (!started) {
+            started = true
+            lastReportTimeMs = 0L
+            val appContext = context.applicationContext
+            val listener: (BDLocation) -> Unit = { location ->
+                scope.launch {
+                    uploadLocation(appContext, location)
+                }
             }
+            uploadListener = listener
+            BaiduLocationReporter.addListener(listener)
+            Log.i(TAG, "定位上报已绑定百度连续定位")
         }
-        uploadListener = listener
-        BaiduLocationReporter.addListener(listener)
-        Log.i(TAG, "定位上报已绑定百度连续定位")
+        BaiduLocationReporter.start(context.applicationContext)
     }
 
     fun stop() {

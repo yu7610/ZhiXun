@@ -38,7 +38,7 @@ object PhysicalKeyInterceptor {
             return dispatchBlockedKeyEvent(context, event)
         }
         if (PhysicalKeyCodes.isPhotoKey(keyCode, scanCode)) {
-            return dispatchPhotoKeyEvent(event)
+            return dispatchPhotoKeyEvent(context, event)
         }
         if (PhysicalKeyCodes.isMappedKey(keyCode)) {
             return dispatchMappedKeyEvent(context, event)
@@ -65,8 +65,8 @@ object PhysicalKeyInterceptor {
         return VideoKeyHandler.handleBroadcast(context, intent)
     }
 
-    /** 拍照键：广播 [PhotoKeyBlockReceiver] 负责触发；此处仅消费 KeyEvent 阻止系统默认行为 */
-    private fun dispatchPhotoKeyEvent(event: KeyEvent): Boolean {
+    /** 拍照键：前台 KeyEvent 触发；广播 [PhotoKeyBlockReceiver] 负责后台与阻断系统相机 */
+    private fun dispatchPhotoKeyEvent(context: Context, event: KeyEvent): Boolean {
         when (event.action) {
             KeyEvent.ACTION_DOWN -> {
                 if (event.repeatCount == 0) {
@@ -75,6 +75,7 @@ object PhysicalKeyInterceptor {
                         "拍照键按下 keyCode=${event.keyCode} " +
                             "(${KeyEvent.keyCodeToString(event.keyCode)}) scanCode=${event.scanCode}",
                     )
+                    VideoKeyHandler.requestServerPhoto(context)
                 }
                 return true
             }

@@ -33,6 +33,8 @@ object BaiduLocationReporter {
 
     @Volatile
     private var client: LocationClient? = null
+    @Volatile
+    private var lastValidLocation: BDLocation? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val listeners = LinkedHashSet<(BDLocation) -> Unit>()
@@ -69,6 +71,7 @@ object BaiduLocationReporter {
                 Log.i(TAG, "跳过重复定位回调 lat=${location.latitude} lng=${location.longitude}")
                 return
             }
+            lastValidLocation = location
             Log.i(
                 TAG,
                 "百度定位回调 type=${location.locType} lat=${location.latitude} lng=${location.longitude} " +
@@ -101,7 +104,9 @@ object BaiduLocationReporter {
         }
         if (client != null) return
         val application = app as Application
-        BaiduSdkInitializer.ensureInitialized(application)
+        if (!BaiduSdkInitializer.isReady()) {
+            BaiduSdkInitializer.ensureInitialized(application)
+        }
         val locationClient = LocationClient(application)
         val option = buildLocationOption()
         locationClient.locOption = option
@@ -119,12 +124,16 @@ object BaiduLocationReporter {
         lastDeliveredKey = null
         lastDeliveredAtMs = 0L
         periodicScheduled = false
-        mainHandler.postDelayed(locationTimeout, LOCATION_TIMEOUT_MS)
         Log.i(TAG, "百度定位已启动 interval=${SCAN_INTERVAL_MS}ms")
+        requestLocate("启动", restartClient = false)
     }
 
     fun addListener(listener: (BDLocation) -> Unit) {
         listeners.add(listener)
+        lastValidLocation?.let { cached ->
+            Log.i(TAG, "向新监听器回放最近定位 lat=${cached.latitude} lng=${cached.longitude}")
+            runCatching { listener(cached) }
+        }
     }
 
     fun removeListener(listener: (BDLocation) -> Unit) {
@@ -154,6 +163,7 @@ object BaiduLocationReporter {
         periodicScheduled = false
         lastDeliveredKey = null
         lastDeliveredAtMs = 0L
+        lastValidLocation = null
         runCatching { client?.disableLocInForeground(true) }
         runCatching { client?.unRegisterLocationListener(baiduListener) }
         runCatching { client?.stop() }
@@ -177,12 +187,22 @@ object BaiduLocationReporter {
         }
     }
 
-    private fun triggerLocate(reason: String) {
+    fun requestLocate(reason: String) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { requestLocate(reason) }
+            return
+        }
+        triggerLocate(reason)
+    }
+
+    private fun requestLocate(reason: String, restartClient: Boolean) {
         val current = client ?: return
         periodicScheduled = false
         mainHandler.removeCallbacks(locationTimeout)
-        Log.i(TAG, "$reason 触发定位 started=${current.isStarted}")
-        current.restart()
+        Log.i(TAG, "$reason 触发定位 started=${current.isStarted} restart=$restartClient")
+        if (restartClient) {
+            current.restart()
+        }
         var code = current.requestLocation()
         Log.i(TAG, "$reason requestLocation 返回=$code started=${current.isStarted}")
         if (code == 1) {
@@ -192,6 +212,13 @@ object BaiduLocationReporter {
         }
         mainHandler.postDelayed(locationTimeout, LOCATION_TIMEOUT_MS)
     }
+
+    private fun triggerLocate(reason: String) {
+        val restartClient = reason !in NO_RESTART_REASONS
+        requestLocate(reason, restartClient)
+    }
+
+    private val NO_RESTART_REASONS = setOf("启动", "定时", "进入定位页")
 
     private fun scheduleInvalidRetry() {
         mainHandler.removeCallbacks(locationTimeout)
@@ -225,17 +252,17 @@ object BaiduLocationReporter {
         if (abs(lat) < 1e-4 || abs(lng) < 1e-4) return false
         if (lat !in -90.0..90.0 || lng !in -180.0..180.0) return false
         return when (location.locType) {
-            BDLocation.TypeGpsLocation,
-            BDLocation.TypeGnssLocation,
-            BDLocation.TypeNetWorkLocation,
-            BDLocation.TypeOffLineLocation,
-            BDLocation.TypeCacheLocation,
-            BDLocation.TYPE_HD_LOCATION,
-            BDLocation.TYPE_BMS_HD_LOCATION,
-            -> true
-            else -> false
+            LOC_TYPE_NETWORK_EXCEPTION,
+            LOC_TYPE_SERVER_ERROR,
+            LOC_TYPE_LOCATION_SWITCH_OFF,
+            -> false
+            else -> true
         }
     }
+
+    private const val LOC_TYPE_NETWORK_EXCEPTION = 63
+    private const val LOC_TYPE_SERVER_ERROR = 67
+    private const val LOC_TYPE_LOCATION_SWITCH_OFF = 505
 
     private fun buildForegroundNotification(context: Context): android.app.Notification {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

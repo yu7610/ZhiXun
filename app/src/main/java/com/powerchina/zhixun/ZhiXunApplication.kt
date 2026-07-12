@@ -8,7 +8,8 @@ import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 import com.powerchina.zhixun.dashcam.VideoKeyRegistrar
 import com.powerchina.zhixun.physicalkey.PhysicalKeyLifecycle
-import com.powerchina.zhixun.location.BaiduSdkInitializer
+import com.powerchina.zhixun.location.LocationBootstrap
+import com.powerchina.zhixun.xiaozhi.wake.OfflineWakeDetector
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 import com.powerchina.zhixun.xiaozhi.XiaozhiLifecycle
 import com.powerchina.zhixun.xiaozhi.XiaozhiMcpHandler
@@ -20,7 +21,8 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         super.onCreate()
         // 第三参数 true：Logcat 输出详细日志，崩溃立即上报（Debug/Release 一致）
         CrashReport.initCrashReport(applicationContext, BUGLY_APP_ID, true)
-        BaiduSdkInitializer.ensureInitialized(this)
+        LocationBootstrap.initialize(this)
+        LocationBootstrap.startLocationIfPermitted(this)
         PhysicalKeyLifecycle.register(this)
         Log.i(
             VideoKeyReceiver.TAG,
@@ -30,6 +32,7 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         VideoKeyHandler.logTestCommands(this)
         XiaozhiLifecycle.register(this)
         XiaozhiMcpHandler.register(this)
+        OfflineWakeDetector.prewarm(this)
         XiaozhiWakeForegroundService.ensureStarted(this)
     }
 

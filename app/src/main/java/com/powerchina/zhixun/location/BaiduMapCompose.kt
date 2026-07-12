@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +32,7 @@ import com.baidu.mapapi.map.OverlayOptions
 import com.baidu.mapapi.map.PolylineOptions
 import com.baidu.mapapi.map.Stroke
 import com.baidu.mapapi.model.LatLng
+import kotlinx.coroutines.delay
 
 @Composable
 fun BaiduMapContainer(
@@ -39,6 +41,12 @@ fun BaiduMapContainer(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val sdkReady = remember { BaiduSdkInitializer.isReady() }
+    if (!sdkReady) {
+        Box(modifier = modifier)
+        return
+    }
+
     val startMarkerIcon = remember { createStartPointMarkerIcon(context) }
     val currentLocationIcon = remember { createCurrentLocationIcon(context) }
     val mapView = remember {
@@ -61,7 +69,6 @@ fun BaiduMapContainer(
             when (event) {
                 Lifecycle.Event.ON_RESUME -> mapView.onResume()
                 Lifecycle.Event.ON_PAUSE -> mapView.onPause()
-                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
                 else -> Unit
             }
         }
@@ -74,11 +81,23 @@ fun BaiduMapContainer(
         }
     }
 
+    LaunchedEffect(uiState.currentLat, uiState.currentLng, baiduMap) {
+        val map = baiduMap ?: return@LaunchedEffect
+        val lat = uiState.currentLat ?: return@LaunchedEffect
+        val lng = uiState.currentLng ?: return@LaunchedEffect
+        map.setMyLocationData(
+            MyLocationData.Builder()
+                .latitude(lat)
+                .longitude(lng)
+                .build(),
+        )
+    }
+
     LaunchedEffect(
+        uiState.tab,
         uiState.currentLat,
         uiState.currentLng,
-        uiState.tab,
-        uiState.trackPoints,
+        uiState.trackPoints.size,
         uiState.startPoint,
         uiState.fenceCenterLat,
         uiState.fenceCenterLng,
@@ -89,6 +108,7 @@ fun BaiduMapContainer(
         val map = baiduMap ?: return@LaunchedEffect
         val lat = uiState.currentLat ?: return@LaunchedEffect
         val lng = uiState.currentLng ?: return@LaunchedEffect
+        delay(300)
 
         map.clear()
         map.setMyLocationData(

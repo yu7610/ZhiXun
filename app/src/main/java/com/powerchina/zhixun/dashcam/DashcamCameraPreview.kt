@@ -1,6 +1,7 @@
 package com.powerchina.zhixun.dashcam
 
 import android.content.Context
+import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
@@ -27,6 +28,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.Executor
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 @Composable
@@ -75,22 +77,37 @@ fun DashcamCameraPreview(
     }
 
     LaunchedEffect(lensFacing, bindGeneration) {
-        val cameraProvider = withContext(Dispatchers.IO) {
-            ProcessCameraProvider.getInstance(context).get()
+        McpCameraHolder.pauseForDashcam()
+        val cameraProvider = try {
+            withContext(Dispatchers.IO) {
+                ProcessCameraProvider.getInstance(context).get()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "获取 CameraProvider 失败", e)
+            onSessionReady(null)
+            return@LaunchedEffect
         }
+        if (!isActive) return@LaunchedEffect
         cameraProviderRef = cameraProvider
-        bindCamera(
-            context = context,
-            cameraProvider = cameraProvider,
-            lifecycleOwner = lifecycleOwner,
-            previewView = previewView,
-            lensFacing = lensFacing,
-            mainExecutor = mainExecutor,
-            onSessionReady = onSessionReady,
-        )
+        try {
+            bindCamera(
+                context = context,
+                cameraProvider = cameraProvider,
+                lifecycleOwner = lifecycleOwner,
+                previewView = previewView,
+                lensFacing = lensFacing,
+                mainExecutor = mainExecutor,
+                onSessionReady = onSessionReady,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "绑定相机失败", e)
+            onSessionReady(null)
+        }
     }
 
 }
+
+private const val TAG = "DashcamCamera"
 
 private fun bindCamera(
     context: Context,

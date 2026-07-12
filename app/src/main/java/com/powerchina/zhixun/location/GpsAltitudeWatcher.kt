@@ -6,7 +6,8 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
-import android.os.Looper
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import kotlin.math.abs
 
@@ -20,6 +21,8 @@ class GpsAltitudeWatcher(
     private val appContext = context.applicationContext
     private val locationManager =
         appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+    private val handlerThread = HandlerThread("GpsAltitude").apply { start() }
+    private val gpsHandler = Handler(handlerThread.looper)
     private var running = false
 
     private val listener = object : LocationListener {
@@ -59,7 +62,7 @@ class GpsAltitudeWatcher(
                 1000L,
                 0f,
                 listener,
-                Looper.getMainLooper(),
+                gpsHandler.looper,
             )
             subscribed = true
         }
@@ -74,6 +77,7 @@ class GpsAltitudeWatcher(
         if (!running) return
         running = false
         runCatching { locationManager.removeUpdates(listener) }
+        handlerThread.quitSafely()
         Log.i(TAG, "GPS 海拔监听已停止")
     }
 

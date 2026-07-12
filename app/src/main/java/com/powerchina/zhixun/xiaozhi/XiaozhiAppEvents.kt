@@ -154,6 +154,7 @@ object XiaozhiAppEvents {
             mainHandler.removeCallbacks(photoSessionTimeoutRunnable)
             photoSessionActive = false
             SharedCameraCapture.forceReset()
+            SharedCameraCapture.releasePreWarm()
         }
         Log.i(
             PhotoKeyLog.TAG,

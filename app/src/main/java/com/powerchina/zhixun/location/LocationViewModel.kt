@@ -5,7 +5,6 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.baidu.location.BDLocation
-import com.powerchina.zhixun.BuildConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -26,13 +25,28 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
     }
 
     init {
-        BaiduSdkInitializer.ensureInitialized(application)
-        if (BuildConfig.BAIDU_MAP_AK.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "请在 local.properties 配置 baiduMapAk") }
+        val manifestAk = BaiduSdkInitializer.resolveApiKey(application)
+        when {
+            manifestAk.isBlank() -> {
+                _uiState.update {
+                    it.copy(
+                        errorMessage = "百度地图 AK 未生效：请确认 local.properties / gradle.properties 中已配置 baiduMapAk，并重新编译安装",
+                    )
+                }
+            }
+            !BaiduSdkInitializer.isReady() -> {
+                _uiState.update {
+                    it.copy(errorMessage = BaiduSdkInitializer.lastError() ?: "百度地图 SDK 未就绪")
+                }
+            }
+        }
+        if (LocationBootstrap.hasLocationPermission(application)) {
+            startTracking()
         }
     }
 
     fun onPermissionsGranted() {
+        LocationBootstrap.startLocationIfPermitted(getApplication())
         startTracking()
     }
 
@@ -47,8 +61,9 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
     private fun startTracking() {
         if (trackingStarted) return
         trackingStarted = true
-        LocationReportCoordinator.ensureStarted(getApplication())
         BaiduLocationReporter.addListener(mapListener)
+        LocationReportCoordinator.ensureStarted(getApplication())
+        BaiduLocationReporter.requestLocate("进入定位页")
         altitudeWatcher = GpsAltitudeWatcher(getApplication()) { altitudeM ->
             lastAltitudeM = altitudeM
             _uiState.update { state ->

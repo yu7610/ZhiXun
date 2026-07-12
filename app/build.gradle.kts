@@ -17,7 +17,15 @@ val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localProperties.load(FileInputStream(localPropertiesFile))
 }
-val baiduMapAk = localProperties.getProperty("baiduMapAk", "")
+val baiduMapAk = listOf(
+    localProperties.getProperty("baiduMapAk"),
+    localProperties.getProperty("BAIDU_MAP_AK"),
+    keystoreProperties.getProperty("baiduMapAk"),
+    keystoreProperties.getProperty("BAIDU_MAP_AK"),
+    project.findProperty("baiduMapAk") as String?,
+    project.findProperty("BAIDU_MAP_AK") as String?,
+    System.getenv("BAIDU_MAP_AK"),
+).firstOrNull { !it.isNullOrBlank() } ?: ""
 
 android {
     namespace = "com.powerchina.zhixun"

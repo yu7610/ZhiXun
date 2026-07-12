@@ -68,11 +68,15 @@ object VideoKeyHandler {
             }
             DashcamVideoKeyEvents.KeyAction.RECORD -> {
                 DashcamVideoKeyEvents.emit(keyAction)
-                val launchIntent = Intent(context, DashcamActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                if (!DashcamForeground.isActive) {
+                    val launchIntent = Intent(context, DashcamActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                    Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.RECORD} 录像 -> DashcamActivity")
+                    context.startActivity(launchIntent)
+                } else {
+                    Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.RECORD} 录像 -> 已在执法仪页")
                 }
-                Log.d(VideoKeyReceiver.TAG, "keyCode=${PhysicalKeyCodes.RECORD} 录像 -> DashcamActivity")
-                context.startActivity(launchIntent)
                 true
             }
         }

@@ -238,7 +238,7 @@ object McpCameraHolder {
                     return@synchronized
                 }
             }
-            if (DashcamForeground.isActive && SharedCameraCapture.dashcamSession != null) {
+            if (DashcamForeground.isActive) {
                 Log.d(TAG, "执法仪前台占用相机，跳过 MCP 绑定")
             } else {
                 val cameraProvider = providerFuture.get(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)

@@ -13,6 +13,7 @@ class DashcamActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        McpCameraHolder.pauseForDashcam()
         enableEdgeToEdge()
         ScreenOnHelper.attach(this)
         XiaozhiWakeForegroundService.ensureStarted(this)
@@ -23,6 +24,7 @@ class DashcamActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        McpCameraHolder.pauseForDashcam()
         DashcamForeground.setActive(true)
     }
 
