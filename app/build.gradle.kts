@@ -58,22 +58,31 @@ android {
         }
     }
 
+    val releaseKeystoreFile = keystoreProperties["storeFile"]?.let { rootProject.file(it as String) }
+    val hasReleaseKeystore = releaseKeystoreFile?.exists() == true
+
     signingConfigs {
-        create("release") {
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["keyPassword"] as String
-            storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["storePassword"] as String
+        if (hasReleaseKeystore) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = releaseKeystoreFile
+                storePassword = keystoreProperties["storePassword"] as String
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             buildConfigField("String", "BAIDU_MAP_AK", "\"$baiduMapAk\"")
         }
         release {
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             buildConfigField("String", "BAIDU_MAP_AK", "\"$baiduMapAk\"")
             proguardFiles(
