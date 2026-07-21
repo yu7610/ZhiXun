@@ -12,9 +12,15 @@ import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -28,13 +34,15 @@ enum class PhotoFollowUpMode {
 class DashcamViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application.applicationContext
 
-    private companion object {
-        private const val TAG = "DashcamVM"
-        private const val FRAME_UPLOAD_INTERVAL_MS = 5_000L
-    }
-
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+
+    private val _isRecordingStarting = MutableStateFlow(false)
+    val isRecordingUiActive: StateFlow<Boolean> = combine(
+        _isRecording,
+        _isRecordingStarting,
+    ) { recording, starting -> recording || starting }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val _elapsedSeconds = MutableStateFlow(0)
     val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
@@ -84,6 +92,9 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private val _useLocalVoiceAsr = MutableStateFlow(false)
     val useLocalVoiceAsr: StateFlow<Boolean> = _useLocalVoiceAsr.asStateFlow()
 
+    private val _isCameraReady = MutableStateFlow(false)
+    val isCameraReady: StateFlow<Boolean> = _isCameraReady.asStateFlow()
+
     private val audioRecorder = DashcamAudioRecorder(app)
     private var voiceNoteFile: File? = null
     private var localVoiceRecognizer: DashcamLocalVoiceRecognizer? = null
@@ -101,6 +112,16 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private var hasAutoStarted = false
     private var userStoppedRecording = false
     private var pendingPhotoAfterStop = false
+    private var cameraReadyWaitJob: Job? = null
+    private val _requestCameraRebind = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val requestCameraRebind: SharedFlow<Unit> = _requestCameraRebind.asSharedFlow()
+
+    private companion object {
+        private const val TAG = "DashcamVM"
+        private const val FRAME_UPLOAD_INTERVAL_MS = 5_000L
+        private const val CAMERA_READY_RETRY_MS = 250L
+        private const val CAMERA_READY_MAX_ATTEMPTS = 80
+    }
 
     init {
         refreshClips()
@@ -110,8 +131,13 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    private fun setRecordingStarting(starting: Boolean) {
+        recordingStartInProgress.set(starting)
+        _isRecordingStarting.value = starting
+    }
+
     private fun releaseCameraForBackground() {
-        if (_isRecording.value) {
+        if (_isRecording.value || recordingStartInProgress.get()) {
             Log.i(TAG, "执法仪进入后台，停止录像以释放相机")
             stopRecording(markUserStopped = false)
         }
@@ -121,36 +147,88 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     fun bindCameraSession(session: DashcamCameraSession?) {
         cameraSession = session
         SharedCameraCapture.dashcamSession = session
-        if (session != null) {
-            McpCameraHolder.pauseForDashcam()
-            recordingStartInProgress.set(false)
-            if (_photoFollowUpMode.value != PhotoFollowUpMode.VoiceNote) {
-                userStoppedRecording = false
+        _isCameraReady.value = session != null
+        Log.i(TAG, "bindCameraSession ready=${session != null}")
+        if (session == null) {
+            if (_isRecording.value || recordingStartInProgress.get()) {
+                Log.w(TAG, "相机会话断开，重置录像状态")
+                cancelPendingRecordingState()
             }
-            if (_isRecording.value && !session.recordingController.isRecording) {
-                Log.w(TAG, "相机重绑导致录像中断，重置状态")
-                _isRecording.value = false
-                recordingStartInProgress.set(false)
-                stopTimer()
-                stopFrameUploadLoop()
+            return
+        }
+        setRecordingStarting(false)
+        if (_isRecording.value && !session.recordingController.isRecording) {
+            Log.w(TAG, "相机重绑导致录像中断，重置状态")
+            cancelPendingRecordingState()
+        }
+        tryAutoStartRecording()
+    }
+
+    /** 相机未绑定时清理录像 UI/启动中的状态，避免「显示停止但 controller 为空」。 */
+    private fun cancelPendingRecordingState(markUserStopped: Boolean = false) {
+        if (markUserStopped) userStoppedRecording = true
+        setRecordingStarting(false)
+        cancelRecordingStartTimeout()
+        cameraReadyWaitJob?.cancel()
+        cameraReadyWaitJob = null
+        _isRecording.value = false
+        stopTimer()
+        stopFrameUploadLoop()
+    }
+
+    private fun waitForCameraReady(onReady: () -> Unit) {
+        recordingController?.let {
+            onReady()
+            return
+        }
+        _requestCameraRebind.tryEmit(Unit)
+        if (cameraReadyWaitJob?.isActive == true) return
+        cameraReadyWaitJob = viewModelScope.launch {
+            repeat(CAMERA_READY_MAX_ATTEMPTS) {
+                if (userStoppedRecording) return@launch
+                if (recordingController != null) {
+                    onReady()
+                    return@launch
+                }
+                if (it % 8 == 7) {
+                    _requestCameraRebind.tryEmit(Unit)
+                }
+                delay(CAMERA_READY_RETRY_MS)
             }
-            tryAutoStartRecording()
+            if (!userStoppedRecording) {
+                showMessage("相机未就绪，请稍后再试")
+            }
         }
     }
 
     fun stopRecordingIfActive() {
-        if (_isRecording.value) {
+        if (_isRecording.value || recordingStartInProgress.get()) {
             userStoppedRecording = true
             stopRecording()
         }
     }
 
+    fun onDashcamForeground() {
+        userStoppedRecording = false
+        _requestCameraRebind.tryEmit(Unit)
+        tryAutoStartRecording()
+    }
+
     fun tryAutoStartRecording() {
-        val controller = recordingController ?: return
-        if (userStoppedRecording || _isAudioRecording.value) return
+        val controller = recordingController
+        if (controller == null) {
+            Log.d(TAG, "tryAutoStart: 相机 session 未就绪")
+            return
+        }
+        if (userStoppedRecording) {
+            Log.d(TAG, "tryAutoStart: 用户已手动停止")
+            return
+        }
+        if (_isAudioRecording.value) return
         if (_photoFollowUpMode.value == PhotoFollowUpMode.VoiceNote) return
         if (_isRecording.value || controller.isRecording || recordingStartInProgress.get()) return
         if (!hasAutoStarted) hasAutoStarted = true
+        Log.i(TAG, "tryAutoStart: 自动开始录像")
         startRecording(controller)
     }
 
@@ -335,7 +413,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private fun capturePhotoInternal() {
         val session = cameraSession
         if (session == null) {
-            showMessage("相机未就绪")
+            waitForCameraReady { capturePhotoInternal() }
             return
         }
         if (!photoCaptureInProgress.compareAndSet(false, true)) {
@@ -419,18 +497,21 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         if (_photoFollowUpMode.value == PhotoFollowUpMode.VoiceNote) {
             resetPhotoFollowUp(resumeRecording = false)
         }
-        val controller = recordingController
-        if (controller == null) {
-            showMessage("相机未就绪")
-            return
-        }
-        if (_isRecording.value) {
+        if (_isRecording.value || recordingStartInProgress.get()) {
             userStoppedRecording = true
             stopRecording()
-        } else {
-            userStoppedRecording = false
-            startRecording(controller)
+            return
         }
+        val controller = recordingController
+        if (controller == null) {
+            waitForCameraReady {
+                userStoppedRecording = false
+                recordingController?.let { startRecording(it) }
+            }
+            return
+        }
+        userStoppedRecording = false
+        startRecording(controller)
     }
 
     /** 物理录像键：keyCode=136 切换录像 */
@@ -445,7 +526,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             "onVideoKey: action=$action, isRecording=${_isRecording.value}, " +
                 "cameraReady=${recordingController != null}",
         )
-        if (_isRecording.value) {
+        if (_isRecording.value || recordingStartInProgress.get()) {
             Log.d(VideoKeyReceiver.TAG, "长按 -> 停止录像")
             userStoppedRecording = true
             stopRecording()
@@ -454,8 +535,10 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             userStoppedRecording = false
             val controller = recordingController
             if (controller == null) {
-                Log.w(VideoKeyReceiver.TAG, "长按失败: 相机未就绪")
-                showMessage("相机未就绪")
+                waitForCameraReady {
+                    userStoppedRecording = false
+                    recordingController?.let { startRecording(it) }
+                }
             } else {
                 startRecording(controller)
             }
@@ -469,12 +552,13 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
         if (controller.isRecording || _isRecording.value) return
         if (!recordingStartInProgress.compareAndSet(false, true)) return
+        _isRecordingStarting.value = true
         scheduleRecordingStartTimeout()
         val request = runCatching {
             DashcamRecordingStore.createVideoOutputRequest(app)
         }.getOrElse { err ->
             cancelRecordingStartTimeout()
-            recordingStartInProgress.set(false)
+            setRecordingStarting(false)
             Log.e(TAG, "创建录像输出失败", err)
             showMessage(err.message ?: "无法创建录像文件")
             return
@@ -482,16 +566,24 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         val started = controller.startRecording(
             request = request,
             onStarted = {
+                if (recordingController !== controller) {
+                    Log.w(TAG, "忽略过期录像启动回调")
+                    return@startRecording
+                }
                 cancelRecordingStartTimeout()
-                recordingStartInProgress.set(false)
+                setRecordingStarting(false)
                 _isRecording.value = true
                 _elapsedSeconds.value = 0
                 startTimer()
                 startFrameUploadLoop()
             },
             onError = { err ->
+                if (recordingController !== controller) {
+                    Log.w(TAG, "忽略过期录像错误回调: $err")
+                    return@startRecording
+                }
                 cancelRecordingStartTimeout()
-                recordingStartInProgress.set(false)
+                setRecordingStarting(false)
                 _isRecording.value = false
                 stopTimer()
                 stopFrameUploadLoop()
@@ -500,7 +592,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         )
         if (!started) {
             cancelRecordingStartTimeout()
-            recordingStartInProgress.set(false)
+            setRecordingStarting(false)
             showMessage("录像未启动：${request.displayName}")
         }
     }
@@ -510,7 +602,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         recordingStartTimeoutJob = viewModelScope.launch {
             delay(8_000)
             if (recordingStartInProgress.get() && !_isRecording.value) {
-                recordingStartInProgress.set(false)
+                setRecordingStarting(false)
                 showMessage("录像启动超时，请重试")
             }
         }
@@ -522,7 +614,23 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun stopRecording(markUserStopped: Boolean = true) {
-        val controller = recordingController ?: run {
+        val controller = recordingController
+        if (controller == null) {
+            if (_isRecording.value || recordingStartInProgress.get()) {
+                if (markUserStopped) userStoppedRecording = true
+                cancelPendingRecordingState(markUserStopped = markUserStopped)
+            }
+            if (pendingPhotoAfterStop) {
+                pendingPhotoAfterStop = false
+                capturePhotoInternal()
+            }
+            return
+        }
+        if (!controller.isRecording) {
+            if (_isRecording.value || recordingStartInProgress.get()) {
+                if (markUserStopped) userStoppedRecording = true
+                cancelPendingRecordingState(markUserStopped = markUserStopped)
+            }
             if (pendingPhotoAfterStop) {
                 pendingPhotoAfterStop = false
                 capturePhotoInternal()
@@ -532,6 +640,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         if (markUserStopped) userStoppedRecording = true
         controller.stopRecording { result ->
             _isRecording.value = false
+            setRecordingStarting(false)
             stopTimer()
             stopFrameUploadLoop()
             result.onSuccess { output ->
@@ -688,6 +797,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         SharedCameraCapture.dashcamSession = null
         stopFrameUploadLoop()
         cancelRecordingStartTimeout()
+        cameraReadyWaitJob?.cancel()
         compressJob?.cancel()
         RecordingFrameTts.shutdown()
         localVoiceRecognizer?.destroy()

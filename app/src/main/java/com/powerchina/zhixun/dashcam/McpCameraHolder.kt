@@ -248,6 +248,10 @@ object McpCameraHolder {
                 mainHandler.post {
                     try {
                         synchronized(lock) {
+                            if (DashcamForeground.isActive) {
+                                Log.d(TAG, "执法仪前台占用，放弃 MCP 绑定")
+                                return@post
+                            }
                             resetBindingLocked()
                             val capture = SilentImageCapture.build()
                             cameraProvider.unbindAll()
@@ -310,10 +314,12 @@ object McpCameraHolder {
 
     private fun resetBindingLocked() {
         try {
-            provider?.unbindAll()
+            if (!DashcamForeground.isActive) {
+                provider?.unbindAll()
+                provider = null
+            }
         } catch (_: Exception) {
         }
-        provider = null
         imageCapture = null
         bound = false
         binding = false

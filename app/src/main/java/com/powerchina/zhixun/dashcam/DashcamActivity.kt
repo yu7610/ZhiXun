@@ -24,13 +24,13 @@ class DashcamActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        McpCameraHolder.pauseForDashcam()
         DashcamForeground.setActive(true)
+        McpCameraHolder.pauseForDashcam()
     }
 
     override fun onPause() {
-        DashcamForeground.setActive(false)
         super.onPause()
+        DashcamForeground.setActive(false)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {

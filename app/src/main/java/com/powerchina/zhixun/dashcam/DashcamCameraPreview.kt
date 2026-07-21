@@ -2,6 +2,7 @@ package com.powerchina.zhixun.dashcam
 
 import android.content.Context
 import android.util.Log
+import android.view.View
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
@@ -27,14 +28,23 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.Executor
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+
+private const val TAG = "DashcamCamera"
+private const val BIND_SETTLE_MS = 350L
+private const val MAX_BIND_ATTEMPTS = 6
 
 @Composable
 fun DashcamCameraPreview(
     lensFacing: Int,
     modifier: Modifier = Modifier,
+    rebindToken: Int = 0,
     onSessionReady: (DashcamCameraSession?) -> Unit,
 ) {
     val context = LocalContext.current
@@ -48,6 +58,7 @@ fun DashcamCameraPreview(
     }
     var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var bindGeneration by remember { mutableIntStateOf(0) }
+    var wasPaused by remember { mutableStateOf(false) }
 
     AndroidView(
         factory = { previewView },
@@ -58,11 +69,15 @@ fun DashcamCameraPreview(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> {
+                    wasPaused = true
                     runCatching { cameraProviderRef?.unbindAll() }
                     onSessionReady(null)
                 }
                 Lifecycle.Event.ON_RESUME -> {
-                    bindGeneration++
+                    if (wasPaused) {
+                        wasPaused = false
+                        bindGeneration++
+                    }
                 }
                 else -> Unit
             }
@@ -76,8 +91,19 @@ fun DashcamCameraPreview(
         }
     }
 
-    LaunchedEffect(lensFacing, bindGeneration) {
+    LaunchedEffect(lensFacing, bindGeneration, rebindToken) {
+        onSessionReady(null)
+        if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            Log.w(TAG, "生命周期未 STARTED，跳过绑定 gen=$bindGeneration")
+            return@LaunchedEffect
+        }
         McpCameraHolder.pauseForDashcam()
+        delay(BIND_SETTLE_MS)
+        if (!isActive) return@LaunchedEffect
+
+        previewView.awaitAttachedAndLaidOut()
+        if (!isActive) return@LaunchedEffect
+
         val cameraProvider = try {
             withContext(Dispatchers.IO) {
                 ProcessCameraProvider.getInstance(context).get()
@@ -89,25 +115,78 @@ fun DashcamCameraPreview(
         }
         if (!isActive) return@LaunchedEffect
         cameraProviderRef = cameraProvider
-        try {
-            bindCamera(
-                context = context,
-                cameraProvider = cameraProvider,
-                lifecycleOwner = lifecycleOwner,
-                previewView = previewView,
-                lensFacing = lensFacing,
-                mainExecutor = mainExecutor,
-                onSessionReady = onSessionReady,
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "绑定相机失败", e)
+
+        var bound = false
+        for (attempt in 1..MAX_BIND_ATTEMPTS) {
+            if (!isActive) return@LaunchedEffect
+            if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                Log.w(TAG, "绑定前生命周期已暂停 attempt=$attempt")
+                break
+            }
+            try {
+                suspendCancellableCoroutine { cont ->
+                    previewView.post {
+                        if (!cont.isActive) return@post
+                        try {
+                            bindCamera(
+                                context = context,
+                                cameraProvider = cameraProvider,
+                                lifecycleOwner = lifecycleOwner,
+                                previewView = previewView,
+                                lensFacing = lensFacing,
+                                mainExecutor = mainExecutor,
+                                onSessionReady = onSessionReady,
+                            )
+                            cont.resume(Unit)
+                        } catch (e: Exception) {
+                            cont.resumeWithException(e)
+                        }
+                    }
+                }
+                bound = true
+                Log.i(TAG, "相机绑定成功 gen=$bindGeneration attempt=$attempt")
+                break
+            } catch (e: Exception) {
+                Log.w(TAG, "绑定相机失败 gen=$bindGeneration attempt=$attempt/$MAX_BIND_ATTEMPTS", e)
+                onSessionReady(null)
+                if (attempt < MAX_BIND_ATTEMPTS) {
+                    delay(350L * attempt)
+                    McpCameraHolder.pauseForDashcam()
+                    delay(BIND_SETTLE_MS)
+                    previewView.awaitAttachedAndLaidOut()
+                }
+            }
+        }
+        if (!bound) {
+            Log.e(TAG, "绑定相机最终失败 gen=$bindGeneration")
             onSessionReady(null)
         }
     }
-
 }
 
-private const val TAG = "DashcamCamera"
+private suspend fun PreviewView.awaitAttachedAndLaidOut() {
+    suspendCancellableCoroutine { cont ->
+        fun tryResume() {
+            if (cont.isActive && isAttachedToWindow) {
+                cont.resume(Unit)
+            }
+        }
+        if (isAttachedToWindow) {
+            post { tryResume() }
+            return@suspendCancellableCoroutine
+        }
+        val listener = object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                removeOnAttachStateChangeListener(this)
+                v.post { tryResume() }
+            }
+
+            override fun onViewDetachedFromWindow(v: View) = Unit
+        }
+        addOnAttachStateChangeListener(listener)
+        cont.invokeOnCancellation { removeOnAttachStateChangeListener(listener) }
+    }
+}
 
 private fun bindCamera(
     context: Context,
@@ -118,6 +197,9 @@ private fun bindCamera(
     mainExecutor: Executor,
     onSessionReady: (DashcamCameraSession?) -> Unit,
 ) {
+    if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+        throw IllegalStateException("生命周期未 STARTED")
+    }
     val preview = Preview.Builder().build().also {
         it.surfaceProvider = previewView.surfaceProvider
     }

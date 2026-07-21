@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.EditedMediaItem
@@ -103,6 +104,7 @@ object DashcamVideoCompressor {
         )
     }
 
+    @OptIn(UnstableApi::class)
     private suspend fun transcodeToFile(
         context: Context,
         source: File,
@@ -111,11 +113,17 @@ object DashcamVideoCompressor {
         suspendCancellableCoroutine { cont ->
             val app = context.applicationContext
             val sourceUri = source.toUri()
+            val watermarkText = DashcamVideoWatermark.formatRecordingTimestamp(source.name)
+            val videoEffects = buildList {
+                add(Presentation.createForHeight(TARGET_HEIGHT_PX))
+                DashcamVideoWatermark.createOverlayEffect(watermarkText)?.let { add(it) }
+            }
+            Log.i(TAG, "转码加水印 ${source.name} watermark=$watermarkText")
             val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(sourceUri))
                 .setEffects(
                     Effects(
                         emptyList(),
-                        listOf(Presentation.createForHeight(TARGET_HEIGHT_PX)),
+                        videoEffects,
                     ),
                 )
                 .build()

@@ -13,6 +13,9 @@ import java.lang.ref.WeakReference
  */
 object ScreenOnHelper {
 
+    // 暂时注释掉屏幕亮度 / 常亮 / 熄屏控制，恢复时改为 true
+    private const val SCREEN_CONTROL_ENABLED = false
+
     private const val TAG = "ScreenOnHelper"
     private const val IDLE_SCREEN_OFF_MS = 5 * 60 * 1000L
     private const val STANDBY_DIM_MS = 10_000L
@@ -47,6 +50,7 @@ object ScreenOnHelper {
     }
 
     fun attach(activity: Activity) {
+        if (!SCREEN_CONTROL_ENABLED) return
         detach(activity, clearFlag = false)
         attachedActivity = WeakReference(activity)
         keepScreenOn(activity)
@@ -55,6 +59,7 @@ object ScreenOnHelper {
     }
 
     fun onUserInteraction(activity: Activity) {
+        if (!SCREEN_CONTROL_ENABLED) return
         val current = attachedActivity?.get() ?: activity
         if (current != activity) return
         if (inStandbyMode) {
@@ -74,6 +79,7 @@ object ScreenOnHelper {
 
     /** 进入待机 UI：启动 10s 变暗 / 20s 黑屏计时 */
     fun enterStandbyMode(activity: Activity) {
+        if (!SCREEN_CONTROL_ENABLED) return
         if (attachedActivity?.get() != activity) return
         val firstEnter = !inStandbyMode
         inStandbyMode = true
@@ -87,6 +93,7 @@ object ScreenOnHelper {
 
     /** 离开待机 UI：恢复亮度并回到常亮策略 */
     fun exitStandbyMode(activity: Activity) {
+        if (!SCREEN_CONTROL_ENABLED) return
         if (!inStandbyMode) return
         if (attachedActivity?.get() != activity) return
         inStandbyMode = false
@@ -98,6 +105,7 @@ object ScreenOnHelper {
     }
 
     fun detach(activity: Activity, clearFlag: Boolean = true) {
+        if (!SCREEN_CONTROL_ENABLED) return
         if (attachedActivity?.get() == activity) {
             cancelIdleTimer()
             cancelStandbyTimers()

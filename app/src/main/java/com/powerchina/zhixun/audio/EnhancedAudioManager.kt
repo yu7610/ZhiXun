@@ -185,10 +185,12 @@ class EnhancedAudioManager(private val context: Context) {
             record.release()
             throw IllegalStateException("AudioRecord 创建失败，state=${record.state}")
         }
+        val oldRecord = audioRecord
+        val oldEffects = recordEffects
         audioRecord = record
-
-        recordEffects?.release()
         recordEffects = AudioRecordEffects.attach(record, TAG)
+        // 旧采集放到后台释放，避免主线程卡在 AudioEffect.native_release
+        AudioRecordEffects.releaseAsync(oldEffects, oldRecord)
     }
 
     /**
@@ -244,8 +246,7 @@ class EnhancedAudioManager(private val context: Context) {
             if (isRecording) {
                 stopRecording()
             }
-            audioRecord?.release()
-            audioRecord = null
+            detachRecorderAsync()
             if (opusEncoder == null || opusDecoder == null) {
                 opusEncoder = OpusEncoder(RECORD_SAMPLE_RATE, 1, FRAME_DURATION_MS)
                 opusDecoder = OpusDecoder(PLAY_SAMPLE_RATE, 1, FRAME_DURATION_MS)
@@ -336,14 +337,17 @@ class EnhancedAudioManager(private val context: Context) {
      */
     fun releaseRecorderOnly() {
         stopRecording()
-        recordEffects?.release()
-        recordEffects = null
-        try {
-            audioRecord?.release()
-        } catch (_: Exception) {
-        }
-        audioRecord = null
+        detachRecorderAsync()
         Log.d(TAG, "录音器已释放，麦克风可用于语音唤醒")
+    }
+
+    /** 清空引用后在后台按正确顺序释放效果器与 AudioRecord */
+    private fun detachRecorderAsync() {
+        val record = audioRecord
+        val effects = recordEffects
+        audioRecord = null
+        recordEffects = null
+        AudioRecordEffects.releaseAsync(effects, record)
     }
 
     /**
@@ -460,13 +464,8 @@ class EnhancedAudioManager(private val context: Context) {
     fun cleanup() {
         stopRecording()
         stopStreamPlayback()
+        detachRecorderAsync()
 
-        recordEffects?.release()
-        recordEffects = null
-
-        audioRecord?.release()
-        audioRecord = null
-        
         // 释放Opus编解码器资源
         opusEncoder?.release()
         opusDecoder?.release()

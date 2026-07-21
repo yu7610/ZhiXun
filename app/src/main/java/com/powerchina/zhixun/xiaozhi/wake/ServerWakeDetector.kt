@@ -438,19 +438,21 @@ class ServerWakeDetector(
     }
 
     private fun stopAudio() {
-        try {
-            audioRecord?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            audioRecord?.release()
-        } catch (_: Exception) {
-        }
-        recordEffects?.release()
-        recordEffects = null
+        val record = audioRecord
+        val effects = recordEffects
+        val encoder = opusEncoder
         audioRecord = null
-        opusEncoder?.release()
+        recordEffects = null
         opusEncoder = null
+        AudioRecordEffects.releaseAsync(effects, record)
+        if (encoder != null) {
+            scope.launch {
+                try {
+                    encoder.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     private fun isConfigReady(): Boolean {

@@ -284,17 +284,11 @@ class OfflineWakeDetector(
     }
 
     private fun stopAudio() {
-        try {
-            audioRecord?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            audioRecord?.release()
-        } catch (_: Exception) {
-        }
-        recordEffects?.release()
-        recordEffects = null
+        val record = audioRecord
+        val effects = recordEffects
         audioRecord = null
+        recordEffects = null
+        AudioRecordEffects.releaseAsync(effects, record)
     }
 
     private fun acquireWakeLock() {

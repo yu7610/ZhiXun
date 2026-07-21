@@ -4,6 +4,10 @@ import android.media.AudioRecord
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * 为 AudioRecord 启用系统 AEC/NS（设备支持时）。
@@ -15,6 +19,10 @@ class AudioRecordEffects private constructor(
     val aecEnabled: Boolean get() = acousticEchoCanceler?.enabled == true
     val nsEnabled: Boolean get() = noiseSuppressor?.enabled == true
 
+    /**
+     * 释放 AEC/NS。须在 [AudioRecord.release] 之前调用；
+     * [android.media.audiofx.AudioEffect.release] 的 native 实现可能长时间阻塞，调用方勿在主线程执行。
+     */
     fun release() {
         try {
             acousticEchoCanceler?.release()
@@ -27,6 +35,32 @@ class AudioRecordEffects private constructor(
     }
 
     companion object {
+        /** 串行化释放，避免多路 AudioEffect/AudioRecord 并发 teardown 卡死 HAL */
+        private val releaseScope =
+            CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+
+        /**
+         * 在后台按正确顺序释放效果器与 [AudioRecord]。
+         * 调用方须先清空本地引用再调用，避免与新建采集竞态。
+         */
+        fun releaseAsync(effects: AudioRecordEffects?, record: AudioRecord?) {
+            if (effects == null && record == null) return
+            releaseScope.launch {
+                try {
+                    effects?.release()
+                } catch (_: Exception) {
+                }
+                try {
+                    record?.stop()
+                } catch (_: Exception) {
+                }
+                try {
+                    record?.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
+
         fun attach(record: AudioRecord, logTag: String): AudioRecordEffects {
             var aec: AcousticEchoCanceler? = null
             var ns: NoiseSuppressor? = null

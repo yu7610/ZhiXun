@@ -38,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -54,12 +55,15 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
@@ -88,7 +92,8 @@ fun DashcamScreen(
     viewModel: DashcamViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    val isRecording by viewModel.isRecording.collectAsState()
+    val isRecordingUiActive by viewModel.isRecordingUiActive.collectAsState()
+    val isCameraReady by viewModel.isCameraReady.collectAsState()
     val elapsedSeconds by viewModel.elapsedSeconds.collectAsState()
     val clips by viewModel.clips.collectAsState()
     val isPhotoUploading by viewModel.isPhotoUploading.collectAsState()
@@ -105,6 +110,7 @@ fun DashcamScreen(
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var playingClip by remember { mutableStateOf<DashcamClip?>(null) }
     var showPlaybackSheet by remember { mutableStateOf(false) }
+    var cameraRebindToken by remember { mutableIntStateOf(0) }
 
     val permissionsState = rememberMultiplePermissionsState(
         permissions = buildList {
@@ -119,6 +125,17 @@ fun DashcamScreen(
     )
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner, permissionsState.allPermissionsGranted) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && permissionsState.allPermissionsGranted) {
+                viewModel.onDashcamForeground()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(message) {
         val text = message ?: return@LaunchedEffect
@@ -135,7 +152,18 @@ fun DashcamScreen(
 
     LaunchedEffect(permissionsState.allPermissionsGranted) {
         if (!permissionsState.allPermissionsGranted) return@LaunchedEffect
+        viewModel.onDashcamForeground()
+    }
+
+    LaunchedEffect(isCameraReady, permissionsState.allPermissionsGranted) {
+        if (!permissionsState.allPermissionsGranted || !isCameraReady) return@LaunchedEffect
         viewModel.tryAutoStartRecording()
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.requestCameraRebind.collect {
+            cameraRebindToken++
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -197,13 +225,14 @@ fun DashcamScreen(
                 if (permissionsState.allPermissionsGranted) {
                     DashcamCameraPreview(
                         lensFacing = lensFacing,
+                        rebindToken = cameraRebindToken,
                         modifier = Modifier.fillMaxSize(),
                         onSessionReady = { session ->
                             viewModel.bindCameraSession(session)
                         },
                     )
                     DashcamTopBar(
-                        isRecording = isRecording,
+                        isRecording = isRecordingUiActive,
                         elapsedSeconds = elapsedSeconds,
                         onBack = onBack,
                         modifier = Modifier.align(Alignment.TopCenter),
@@ -233,7 +262,8 @@ fun DashcamScreen(
 
             ControlButtonPanel(
                 enabled = permissionsState.allPermissionsGranted,
-                isRecording = isRecording,
+                isRecording = isRecordingUiActive,
+                recordEnabled = permissionsState.allPermissionsGranted,
                 photoFollowUpMode = photoFollowUpMode,
                 isVoiceHolding = isVoiceHolding,
                 useLocalVoiceAsr = useLocalVoiceAsr,
@@ -384,6 +414,7 @@ private fun UploadConfirmDialog(
 private fun ControlButtonPanel(
     enabled: Boolean,
     isRecording: Boolean,
+    recordEnabled: Boolean = enabled,
     photoFollowUpMode: PhotoFollowUpMode,
     isVoiceHolding: Boolean,
     useLocalVoiceAsr: Boolean,
@@ -443,7 +474,7 @@ private fun ControlButtonPanel(
                     if (isRecording) R.string.dashcam_btn_stop else R.string.dashcam_btn_start,
                 ),
                 color = if (isRecording) RecRed else BtnStartGreen,
-                enabled = enabled,
+                enabled = recordEnabled,
                 modifier = Modifier.weight(1f),
                 height = 56.dp,
                 onClick = onRecordToggle,
