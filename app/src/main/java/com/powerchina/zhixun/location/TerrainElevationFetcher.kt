@@ -1,6 +1,5 @@
 package com.powerchina.zhixun.location
 
-import android.content.Context
 import android.util.Log
 import com.google.gson.JsonParser
 import java.util.concurrent.ConcurrentHashMap

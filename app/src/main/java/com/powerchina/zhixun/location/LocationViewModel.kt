@@ -100,7 +100,7 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
                 state.copy(altitudeText = LocationAltitudeHelper.format(altitudeM))
             }
         }.also { it.start() }
-        Log.i(TAG, "定位页已启动连续定位循环 ${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
+        Log.i(TAG, "定位页已启动定位脉冲 ${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
     }
 
     private fun stopTracking() {
@@ -110,7 +110,7 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         altitudeWatcher = null
         BaiduLocationReporter.removeListener(mapListener)
         LocationReportCoordinator.stop()
-        Log.i(TAG, "离开定位页，已停止连续定位与上报")
+        Log.i(TAG, "离开定位页，已停止定位与上报")
     }
 
     private fun publishLocation(location: BDLocation) {
@@ -128,7 +128,6 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         _uiState.update { state ->
             val trackPoints = state.trackPoints + point
             state.copy(
-                locationReady = true,
                 currentLat = location.latitude,
                 currentLng = location.longitude,
                 coordinateText = LocationTrackRepository.formatCoordinate(

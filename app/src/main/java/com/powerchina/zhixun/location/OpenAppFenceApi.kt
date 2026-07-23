@@ -30,7 +30,7 @@ object OpenAppFenceApi {
 
     private const val TAG = "LocationReport"
     const val BASE_URL = "https://111.231.8.58:18099"
-    const val GENERATE_TOKEN_URL = "$BASE_URL/openApp/generateToken"
+    private const val GENERATE_TOKEN_URL = "$BASE_URL/openApp/generateToken"
     private const val APP_ID = "0aff4d17e27b45b5"
     private const val APP_SECRET = "d3e1d6a6d8ee432b9b22c0856fcfbea0"
     private const val PREFS_NAME = "open_app_token"
@@ -91,7 +91,7 @@ object OpenAppFenceApi {
         }
     }
 
-    fun generateToken(context: Context): Result<GenerateTokenResult> = runCatching {
+    private fun generateToken(context: Context): Result<GenerateTokenResult> = runCatching {
         val url = "$GENERATE_TOKEN_URL?appId=$APP_ID&appSecret=$APP_SECRET"
         Log.i(TAG, "POST $url")
 

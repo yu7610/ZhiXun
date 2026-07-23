@@ -29,8 +29,8 @@ data class GeofencesByDevicesResult(
 object GeofenceApi {
 
     private const val TAG = "GeofenceApi"
-    const val BASE_URL = OpenAppFenceApi.BASE_URL
-    const val BY_DEVICES_URL = "$BASE_URL/api/AIEngineer/geofences/byDevices"
+    private const val BY_DEVICES_URL =
+        "${OpenAppFenceApi.BASE_URL}/api/AIEngineer/geofences/byDevices"
 
     private val gson = Gson()
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
@@ -45,7 +45,7 @@ object GeofenceApi {
         return fetchByDevices(context, listOf(terCode), token)
     }
 
-    fun fetchByDevices(
+    private fun fetchByDevices(
         context: Context,
         terCodes: List<String>,
         token: String,
@@ -95,7 +95,7 @@ object GeofenceApi {
     /**
      * 解析 data：GeoJSON Polygon，coordinates 为 [lng, lat]。
      */
-    fun parseFences(dataElement: JsonElement?): List<FenceArea> {
+    private fun parseFences(dataElement: JsonElement?): List<FenceArea> {
         if (dataElement == null || dataElement.isJsonNull) return emptyList()
         val list: JsonArray = when {
             dataElement.isJsonArray -> dataElement.asJsonArray

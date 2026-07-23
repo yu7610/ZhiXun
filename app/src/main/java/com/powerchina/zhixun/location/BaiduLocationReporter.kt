@@ -61,8 +61,6 @@ object BaiduLocationReporter {
     private var awaitingPulse = false
     @Volatile
     private var lastPulseAtMs: Long = 0L
-    @Volatile
-    private var lastCallbackAtMs: Long = 0L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val listeners = LinkedHashSet<(BDLocation) -> Unit>()
@@ -118,7 +116,6 @@ object BaiduLocationReporter {
             }
             awaitingPulse = false
             consecutiveMisses = 0
-            lastCallbackAtMs = System.currentTimeMillis()
             Log.i(
                 TAG,
                 "定位成功(新点) type=${location.locType} " +
@@ -198,22 +195,10 @@ object BaiduLocationReporter {
         unregisterScreenReceiver()
         appContext?.let { LocationReportForegroundService.ensureStopped(it) }
         lastPulseAtMs = 0L
-        lastCallbackAtMs = 0L
         consecutiveMisses = 0
         destroyClient()
         listeners.clear()
         Log.i(TAG, "定位脉冲 stop()")
-    }
-
-    fun requestLocate(reason: String) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { requestLocate(reason) }
-            return
-        }
-        if (!running) {
-            appContext?.let { start(it) } ?: return
-        }
-        firePulse(reason)
     }
 
     private fun tickPulse() {

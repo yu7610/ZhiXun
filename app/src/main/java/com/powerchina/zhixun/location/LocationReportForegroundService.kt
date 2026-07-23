@@ -116,7 +116,7 @@ class LocationReportForegroundService : Service() {
     companion object {
         private const val TAG = "LocationReport"
         private const val CHANNEL_ID = "zhixun_location_report"
-        const val NOTIFICATION_ID = 1002
+        private const val NOTIFICATION_ID = 1002
         private const val ACTION_STOP = "com.powerchina.zhixun.location.STOP_REPORT_FG"
 
         @Volatile

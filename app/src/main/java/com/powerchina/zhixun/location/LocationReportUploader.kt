@@ -23,8 +23,8 @@ data class ReceiveLocationResult(
 object LocationReportUploader {
 
     private const val TAG = "LocationReport"
-    const val BASE_URL = OpenAppFenceApi.BASE_URL
-    const val RECEIVE_LOCATION_URL = "$BASE_URL/api/AIEngineer/receiveLocation"
+    private const val RECEIVE_LOCATION_URL =
+        "${OpenAppFenceApi.BASE_URL}/api/AIEngineer/receiveLocation"
 
     fun report(
         context: Context,

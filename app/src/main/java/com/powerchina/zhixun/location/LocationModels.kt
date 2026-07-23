@@ -30,7 +30,6 @@ data class LocationUiState(
     val fenceRadiusM: Double = 120.0,
     /** 围栏 Tab：来自 geofences/byDevices */
     val fences: List<FenceArea> = emptyList(),
-    val locationReady: Boolean = false,
     val errorMessage: String? = null,
 )
 
