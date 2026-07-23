@@ -21,8 +21,8 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         super.onCreate()
         // 第三参数 true：Logcat 输出详细日志，崩溃立即上报（Debug/Release 一致）
         CrashReport.initCrashReport(applicationContext, BUGLY_APP_ID, true)
+        // 仅初始化百度 SDK；连续定位/上报在进入定位页时启动
         LocationBootstrap.initialize(this)
-        LocationBootstrap.startLocationIfPermitted(this)
         PhysicalKeyLifecycle.register(this)
         Log.i(
             VideoKeyReceiver.TAG,

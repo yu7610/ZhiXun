@@ -6,7 +6,7 @@ import kotlin.math.roundToInt
 object LocationTrackRepository {
 
     fun formatCoordinate(lat: Double, lng: Double): String {
-        return "${"%.4f".format(Locale.CHINA, lat)} ${"%.4f".format(Locale.CHINA, lng)}"
+        return "${"%.6f".format(Locale.US, lat)} ${"%.6f".format(Locale.US, lng)}"
     }
 
     fun formatSpeedMps(speedMps: Float): String {

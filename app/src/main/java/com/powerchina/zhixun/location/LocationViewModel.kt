@@ -54,7 +54,6 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun onPermissionsGranted() {
-        LocationBootstrap.startLocationIfPermitted(getApplication())
         startTracking()
     }
 
@@ -92,16 +91,16 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
     private fun startTracking() {
         if (trackingStarted) return
         trackingStarted = true
+        // 先挂监听再 start，避免首点回调丢失
         BaiduLocationReporter.addListener(mapListener)
         LocationReportCoordinator.ensureStarted(getApplication())
-        BaiduLocationReporter.requestLocate("进入定位页")
         altitudeWatcher = GpsAltitudeWatcher(getApplication()) { altitudeM ->
             lastAltitudeM = altitudeM
             _uiState.update { state ->
                 state.copy(altitudeText = LocationAltitudeHelper.format(altitudeM))
             }
         }.also { it.start() }
-        Log.i(TAG, "定位页已启动百度连续定位")
+        Log.i(TAG, "定位页已启动连续定位循环 ${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
     }
 
     private fun stopTracking() {
@@ -111,7 +110,7 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         altitudeWatcher = null
         BaiduLocationReporter.removeListener(mapListener)
         LocationReportCoordinator.stop()
-        Log.i(TAG, "定位页已停止百度连续定位")
+        Log.i(TAG, "离开定位页，已停止连续定位与上报")
     }
 
     private fun publishLocation(location: BDLocation) {
@@ -158,14 +157,25 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    /** 风险告警文案以 receiveLocation 接口 data 为准 */
+    /** 风险告警文案以 receiveLocation 接口 data 为准；data 为空则隐藏 */
     private fun applyRiskFromApi(data: String) {
-        val active = isRiskActive(data)
+        val message = data.trim()
+        if (message.isEmpty()) {
+            _uiState.update { state ->
+                state.copy(
+                    riskActive = false,
+                    riskTitle = "风险告警",
+                    riskMessage = "",
+                )
+            }
+            return
+        }
+        val active = isRiskActive(message)
         _uiState.update { state ->
             state.copy(
                 riskActive = active,
                 riskTitle = if (active) "风险告警" else "安全",
-                riskMessage = data,
+                riskMessage = message,
             )
         }
     }

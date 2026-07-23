@@ -24,18 +24,22 @@ data class GenerateTokenResult(
 )
 
 /**
- * 围栏页：POST /openApp/generateToken
+ * 首页拉取 POST /openApp/generateToken，保存 data 供 receiveLocation / 围栏复用。
  */
 object OpenAppFenceApi {
 
-    private const val TAG = "OpenAppFence"
+    private const val TAG = "LocationReport"
     const val BASE_URL = "https://111.231.8.58:18099"
     const val GENERATE_TOKEN_URL = "$BASE_URL/openApp/generateToken"
     private const val APP_ID = "0aff4d17e27b45b5"
     private const val APP_SECRET = "d3e1d6a6d8ee432b9b22c0856fcfbea0"
+    private const val PREFS_NAME = "open_app_token"
+    private const val KEY_TOKEN = "token"
 
     @Volatile
     private var sharedClient: OkHttpClient? = null
+    @Volatile
+    private var memoryToken: String? = null
 
     private val emptyJson = "{}".toRequestBody("application/json; charset=utf-8".toMediaType())
 
@@ -47,6 +51,45 @@ object OpenAppFenceApi {
     }
 
     private fun client(context: Context): OkHttpClient = httpClient(context)
+
+    /** 读取首页已保存的 token（内存优先，其次 SharedPreferences） */
+    fun savedToken(context: Context): String? {
+        memoryToken?.takeIf { it.isNotBlank() }?.let { return it }
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_TOKEN, null)?.trim()?.takeIf { it.isNotEmpty() }?.also {
+            memoryToken = it
+        }
+    }
+
+    fun requireSavedToken(context: Context): String {
+        return savedToken(context)
+            ?: throw IllegalStateException("token 未就绪：请先打开首页完成 generateToken")
+    }
+
+    private fun saveToken(context: Context, token: String) {
+        memoryToken = token
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_TOKEN, token)
+            .apply()
+        Log.i(TAG, "generateToken data 已保存")
+    }
+
+    /**
+     * 首页调用：请求 generateToken，用 LocationReport 打印 data 并持久化。
+     */
+    fun fetchAndSaveTokenOnHome(context: Context): Result<GenerateTokenResult> {
+        return generateToken(context).onSuccess { result ->
+            val token = result.data?.takeIf { it.isNotBlank() }
+            if (token != null) {
+                Log.i(TAG, "generateToken data=$token")
+                saveToken(context, token)
+            } else {
+                Log.w(TAG, "generateToken data 为空，未保存")
+            }
+        }
+    }
 
     fun generateToken(context: Context): Result<GenerateTokenResult> = runCatching {
         val url = "$GENERATE_TOKEN_URL?appId=$APP_ID&appSecret=$APP_SECRET"

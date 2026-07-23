@@ -11,10 +11,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.powerchina.zhixun.dashcam.VideoKeyActivityHelper
+import com.powerchina.zhixun.location.OpenAppFenceApi
 import com.powerchina.zhixun.ui.ZhiXunNavHost
 import com.powerchina.zhixun.util.ScreenOnHelper
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
+import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
 
@@ -25,6 +27,10 @@ class MainActivity : ComponentActivity() {
         ScreenOnHelper.attach(this)
         handleOpenXiaozhiIntent(intent)
         XiaozhiWakeForegroundService.ensureStarted(this)
+        // 首页拉取 generateToken，data 用 LocationReport 打印并保存，供定位上报/围栏使用
+        thread(name = "generateToken-home") {
+            OpenAppFenceApi.fetchAndSaveTokenOnHome(applicationContext)
+        }
         setContent {
             ZhiXunNavHost()
         }

@@ -24,8 +24,7 @@ data class GeofencesByDevicesResult(
 /**
  * 按设备查询围栏：POST /api/AIEngineer/geofences/byDevices
  *
- * 流程：先 [OpenAppFenceApi.generateToken] 取 token（响应 data），再带 header + 设备号 body 请求本接口。
- * 18099 端口要求 TLS，与 generateToken 同用 HTTPS。
+ * 使用首页已保存的 generateToken data 作为 token，再带 header + 设备号 body 请求本接口。
  */
 object GeofenceApi {
 
@@ -37,14 +36,12 @@ object GeofenceApi {
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
     /**
-     * 点击围栏：generateToken → geofences/byDevices（header=token data，body=设备号）。
+     * 点击围栏：用首页 token → geofences/byDevices。
      */
     fun fetchForDevice(context: Context, terCode: String): Result<GeofencesByDevicesResult> {
-        val tokenResult = OpenAppFenceApi.generateToken(context)
-        val token = tokenResult.getOrElse { return Result.failure(it) }.data
-            ?.takeIf { it.isNotBlank() }
-            ?: return Result.failure(IllegalStateException("generateToken 未返回 data"))
-        Log.i(TAG, "已拿到 token，开始请求 geofences/byDevices")
+        val token = runCatching { OpenAppFenceApi.requireSavedToken(context) }
+            .getOrElse { return Result.failure(it) }
+        Log.i(TAG, "使用首页 token 请求 geofences/byDevices")
         return fetchByDevices(context, listOf(terCode), token)
     }
 

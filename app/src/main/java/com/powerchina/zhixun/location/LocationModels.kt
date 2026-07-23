@@ -18,7 +18,8 @@ data class LocationUiState(
     val speedText: String = "--",
     val altitudeText: String = "--",
     val riskTitle: String = "风险告警",
-    val riskMessage: String = "未进入工区",
+    /** receiveLocation 的 data；为空时不展示风险告警卡片 */
+    val riskMessage: String = "",
     val riskActive: Boolean = false,
     val trackPoints: List<TrackPoint> = emptyList(),
     val startPoint: TrackPoint? = null,

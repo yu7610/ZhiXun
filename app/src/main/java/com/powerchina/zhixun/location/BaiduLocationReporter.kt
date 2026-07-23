@@ -2,13 +2,18 @@ package com.powerchina.zhixun.location
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.baidu.location.BDAbstractLocationListener
@@ -19,68 +24,108 @@ import com.powerchina.zhixun.R
 import kotlin.math.abs
 
 /**
- * 百度定位：进入定位页后每 60 秒定位一次。
+ * 百度定位脉冲模式（适配本机 SDK 行为）：
+ *
+ * 设备上连续定位（scanSpan>0）首点后服务不起（isStarted 恒 false、requestLocation=1），
+ * 首点实际来自单次定位通道。因此改为：
+ * - onceLocation=true，每 [SCAN_INTERVAL_MS] 主动 start() 打一枪
+ * - 仅分发本次新回调，绝不复用旧经纬度
+ * - 息屏靠 [LocationReportForegroundService] + 百度 enableLocInForeground
+ *
+ * @see https://lbsyun.baidu.com/index.php?title=android-locsdk/guide/get-location/latlng
  */
 object BaiduLocationReporter {
 
     const val TAG = "LocationReport"
-    const val SCAN_INTERVAL_MS = 60_000
-    private const val LOCATION_TIMEOUT_MS = 15_000L
-    private const val INVALID_RETRY_MS = 10_000L
-    private const val CALLBACK_DEDUP_MS = 5_000L
-    private const val LOCATION_NOTIFICATION_ID = 2002
-    private const val LOCATION_CHANNEL_ID = "location_tracking"
+    const val SCAN_INTERVAL_MS = 6_000
+    private const val START_DELAY_MS = 200L
+    /** 单次定位超时，超时才允许下一发 */
+    private const val PULSE_TIMEOUT_MS = 12_000L
+    private const val BAIDU_FG_CHANNEL_ID = "zhixun_location_baidu_fg"
+    private const val BAIDU_FG_NOTIFICATION_ID = 1003
 
     @Volatile
-    private var client: LocationClient? = null
+    private var appContext: Application? = null
     @Volatile
-    private var lastValidLocation: BDLocation? = null
+    private var locationClient: LocationClient? = null
+    @Volatile
+    private var running = false
+    @Volatile
+    private var screenInteractive = true
+    @Volatile
+    private var screenReceiverRegistered = false
+    @Volatile
+    private var baiduForegroundEnabled = false
+    /** 已发出 start，等待本次新点 */
+    @Volatile
+    private var awaitingPulse = false
+    @Volatile
+    private var lastPulseAtMs: Long = 0L
+    @Volatile
+    private var lastCallbackAtMs: Long = 0L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val listeners = LinkedHashSet<(BDLocation) -> Unit>()
-    private var lastDeliveredKey: String? = null
-    private var lastDeliveredAtMs: Long = 0L
-    private var periodicScheduled = false
-    private val periodicLocate = Runnable { triggerLocate("定时") }
-    private val invalidRetry = Runnable { triggerLocate("无效重试") }
-    private val locationTimeout = Runnable {
-        Log.w(TAG, "定位超时无回调，重新定位")
-        triggerLocate("超时重试")
+    private var consecutiveMisses = 0
+
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> onScreenOff()
+                Intent.ACTION_SCREEN_ON,
+                Intent.ACTION_USER_PRESENT,
+                -> onScreenOn(intent.action.orEmpty())
+            }
+        }
     }
-    private val baiduListener = object : BDAbstractLocationListener() {
+
+    private val pulseLoop = object : Runnable {
+        override fun run() {
+            if (!running) return
+            try {
+                tickPulse()
+            } finally {
+                if (running) {
+                    mainHandler.postDelayed(this, SCAN_INTERVAL_MS.toLong())
+                }
+            }
+        }
+    }
+
+    private val firstPulse = Runnable {
+        if (!running) return@Runnable
+        firePulse("首次")
+    }
+
+    private val locationListener = object : BDAbstractLocationListener() {
         override fun onReceiveLocation(location: BDLocation?) {
-            mainHandler.removeCallbacks(locationTimeout)
             if (location == null) {
-                Log.w(TAG, "百度定位回调 location=null")
-                scheduleInvalidRetry()
+                Log.w(TAG, "onReceiveLocation location=null")
                 return
             }
             Log.i(
                 TAG,
-                "百度定位原始回调 type=${location.locType} lat=${location.latitude} lng=${location.longitude}",
+                "onReceiveLocation type=${location.locType} " +
+                    "lat=${location.latitude} lng=${location.longitude} " +
+                    "isStarted=${locationClient?.isStarted} screenOn=$screenInteractive",
             )
             if (!isValid(location)) {
                 Log.w(
                     TAG,
-                    "百度定位无效 type=${location.locType} lat=${location.latitude} lng=${location.longitude}",
+                    "定位失败 type=${location.locType} desc=${location.locTypeDescription.orEmpty()}",
                 )
-                scheduleInvalidRetry()
                 return
             }
-            if (isDuplicateCallback(location)) {
-                Log.i(TAG, "跳过重复定位回调 lat=${location.latitude} lng=${location.longitude}")
-                return
-            }
-            lastValidLocation = location
+            awaitingPulse = false
+            consecutiveMisses = 0
+            lastCallbackAtMs = System.currentTimeMillis()
             Log.i(
                 TAG,
-                "百度定位回调 type=${location.locType} lat=${location.latitude} lng=${location.longitude} " +
-                    "alt=${location.altitude} hasAlt=${location.hasAltitude()}",
+                "定位成功(新点) type=${location.locType} " +
+                    "lat=${location.latitude} lng=${location.longitude}",
             )
-            listeners.toList().forEach { listener ->
-                runCatching { listener(location) }
-            }
-            scheduleNextLocate()
+            dispatch(location)
+            // 单次定位后服务会停；下一发由 pulseLoop 触发
         }
 
         override fun onLocDiagnosticMessage(
@@ -97,94 +142,67 @@ object BaiduLocationReporter {
 
     @SuppressLint("MissingPermission")
     fun start(context: Context) {
-        val app = context.applicationContext
+        val app = context.applicationContext as Application
         if (Looper.myLooper() != Looper.getMainLooper()) {
             mainHandler.post { start(app) }
             return
         }
-        if (client != null) return
-        val application = app as Application
+        appContext = app
+        screenInteractive = isScreenInteractive(app)
         if (!BaiduSdkInitializer.isReady()) {
-            BaiduSdkInitializer.ensureInitialized(application)
+            BaiduSdkInitializer.ensureInitialized(app)
         }
-        val locationClient = LocationClient(application)
-        val option = buildLocationOption()
-        locationClient.locOption = option
-        locationClient.registerLocationListener(baiduListener)
-        locationClient.start()
-        runCatching {
-            locationClient.enableLocInForeground(
-                LOCATION_NOTIFICATION_ID,
-                buildForegroundNotification(application),
+        registerScreenReceiver(app)
+        LocationReportForegroundService.ensureStarted(app)
+
+        if (locationClient == null) {
+            createClient(app)
+        }
+
+        if (!running) {
+            running = true
+            awaitingPulse = false
+            consecutiveMisses = 0
+            mainHandler.removeCallbacks(pulseLoop)
+            mainHandler.removeCallbacks(firstPulse)
+            mainHandler.postDelayed(firstPulse, START_DELAY_MS)
+            mainHandler.postDelayed(pulseLoop, SCAN_INTERVAL_MS.toLong())
+            Log.i(
+                TAG,
+                "定位脉冲已启动 interval=${SCAN_INTERVAL_MS}ms onceLocation=true " +
+                    "screenOn=$screenInteractive",
             )
-        }.onFailure { e ->
-            Log.w(TAG, "enableLocInForeground 失败，继续定位", e)
         }
-        client = locationClient
-        lastDeliveredKey = null
-        lastDeliveredAtMs = 0L
-        periodicScheduled = false
-        Log.i(TAG, "百度定位已启动 interval=${SCAN_INTERVAL_MS}ms")
-        requestLocate("启动", restartClient = false)
     }
 
     fun addListener(listener: (BDLocation) -> Unit) {
         listeners.add(listener)
-        lastValidLocation?.let { cached ->
-            Log.i(TAG, "向新监听器回放最近定位 lat=${cached.latitude} lng=${cached.longitude}")
-            runCatching { listener(cached) }
-        }
     }
 
     fun removeListener(listener: (BDLocation) -> Unit) {
         listeners.remove(listener)
-        stopIfIdle()
+        if (listeners.isEmpty()) {
+            stop()
+        }
     }
 
     fun stop() {
-        listeners.clear()
-        stopClient()
-    }
-
-    private fun stopIfIdle() {
-        if (listeners.isEmpty()) {
-            stopClient()
-        }
-    }
-
-    private fun stopClient() {
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { stopClient() }
+            mainHandler.post { stop() }
             return
         }
-        mainHandler.removeCallbacks(periodicLocate)
-        mainHandler.removeCallbacks(locationTimeout)
-        mainHandler.removeCallbacks(invalidRetry)
-        periodicScheduled = false
-        lastDeliveredKey = null
-        lastDeliveredAtMs = 0L
-        lastValidLocation = null
-        runCatching { client?.disableLocInForeground(true) }
-        runCatching { client?.unRegisterLocationListener(baiduListener) }
-        runCatching { client?.stop() }
-        client = null
-        Log.i(TAG, "百度定位已停止")
-    }
-
-    private fun buildLocationOption(): LocationClientOption {
-        return LocationClientOption().apply {
-            setLocationMode(LocationClientOption.LocationMode.Hight_Accuracy)
-            setCoorType("bd09ll")
-            setScanSpan(0)
-            setOpenGnss(true)
-            setIsNeedAltitude(true)
-            setIsNeedLocationDescribe(false)
-            setIgnoreKillProcess(true)
-            setOnceLocation(true)
-            setLocationNotify(false)
-            setIsEnableBeidouMode(true)
-            setFirstLocType(LocationClientOption.FirstLocType.ACCURACY_IN_FIRST_LOC)
-        }
+        running = false
+        awaitingPulse = false
+        mainHandler.removeCallbacks(pulseLoop)
+        mainHandler.removeCallbacks(firstPulse)
+        unregisterScreenReceiver()
+        appContext?.let { LocationReportForegroundService.ensureStopped(it) }
+        lastPulseAtMs = 0L
+        lastCallbackAtMs = 0L
+        consecutiveMisses = 0
+        destroyClient()
+        listeners.clear()
+        Log.i(TAG, "定位脉冲 stop()")
     }
 
     fun requestLocate(reason: String) {
@@ -192,56 +210,213 @@ object BaiduLocationReporter {
             mainHandler.post { requestLocate(reason) }
             return
         }
-        triggerLocate(reason)
-    }
-
-    private fun requestLocate(reason: String, restartClient: Boolean) {
-        val current = client ?: return
-        periodicScheduled = false
-        mainHandler.removeCallbacks(locationTimeout)
-        Log.i(TAG, "$reason 触发定位 started=${current.isStarted} restart=$restartClient")
-        if (restartClient) {
-            current.restart()
+        if (!running) {
+            appContext?.let { start(it) } ?: return
         }
-        var code = current.requestLocation()
-        Log.i(TAG, "$reason requestLocation 返回=$code started=${current.isStarted}")
-        if (code == 1) {
-            current.start()
-            code = current.requestLocation()
-            Log.i(TAG, "$reason start 后 requestLocation 返回=$code started=${current.isStarted}")
-        }
-        mainHandler.postDelayed(locationTimeout, LOCATION_TIMEOUT_MS)
+        firePulse(reason)
     }
 
-    private fun triggerLocate(reason: String) {
-        val restartClient = reason !in NO_RESTART_REASONS
-        requestLocate(reason, restartClient)
-    }
-
-    private val NO_RESTART_REASONS = setOf("启动", "定时", "进入定位页")
-
-    private fun scheduleInvalidRetry() {
-        mainHandler.removeCallbacks(locationTimeout)
-        mainHandler.removeCallbacks(invalidRetry)
-        mainHandler.postDelayed(invalidRetry, INVALID_RETRY_MS)
-    }
-
-    private fun scheduleNextLocate() {
-        if (periodicScheduled) return
-        periodicScheduled = true
-        mainHandler.removeCallbacks(periodicLocate)
-        mainHandler.postDelayed(periodicLocate, SCAN_INTERVAL_MS.toLong())
-    }
-
-    private fun isDuplicateCallback(location: BDLocation): Boolean {
-        val key = "%.5f,%.5f".format(location.latitude, location.longitude)
+    private fun tickPulse() {
+        appContext?.let { LocationReportForegroundService.ensureStarted(it) }
         val now = System.currentTimeMillis()
-        val duplicate = key == lastDeliveredKey && now - lastDeliveredAtMs < CALLBACK_DEDUP_MS
-        if (!duplicate) {
-            lastDeliveredKey = key
-            lastDeliveredAtMs = now
+        if (awaitingPulse && now - lastPulseAtMs < PULSE_TIMEOUT_MS) {
+            Log.i(
+                TAG,
+                "pulse: 等待本轮回调 elapsed=${now - lastPulseAtMs}ms screenOn=$screenInteractive",
+            )
+            return
         }
-        return duplicate
+        if (awaitingPulse) {
+            consecutiveMisses++
+            Log.w(TAG, "pulse: 本轮超时无新点 miss#$consecutiveMisses，准备下一发")
+            awaitingPulse = false
+            if (consecutiveMisses >= 3) {
+                recreateClient("连续无新点")
+                return
+            }
+        }
+        firePulse("定时${SCAN_INTERVAL_MS}ms")
+    }
+
+    private fun firePulse(reason: String) {
+        val app = appContext ?: return
+        var client = locationClient
+        if (client == null) {
+            createClient(app)
+            client = locationClient ?: return
+        }
+        // 官方：先 start，再 enableLocInForeground
+        lastPulseAtMs = System.currentTimeMillis()
+        awaitingPulse = true
+        runCatching {
+            if (client.isStarted) {
+                // 单次模式偶发未停干净：restart = stop + 延迟 start
+                client.restart()
+                Log.i(TAG, "$reason restart() 打一枪要新点 screenOn=$screenInteractive")
+            } else {
+                client.start()
+                Log.i(TAG, "$reason start() 打一枪要新点 screenOn=$screenInteractive")
+            }
+            enableBaiduForegroundLocate(client)
+        }.onFailure {
+            awaitingPulse = false
+            Log.e(TAG, "$reason 启动定位失败", it)
+            consecutiveMisses++
+            if (consecutiveMisses >= 2) {
+                recreateClient("脉冲失败")
+            }
+        }
+    }
+
+    private fun onScreenOff() {
+        if (!running) return
+        screenInteractive = false
+        appContext?.let { LocationReportForegroundService.ensureStarted(it) }
+        Log.i(TAG, "息屏：前台服务保活，下一发脉冲仍取新点")
+        // 若当前未在等回调，立即补一发新点
+        if (!awaitingPulse) {
+            firePulse("息屏补点")
+        }
+    }
+
+    private fun onScreenOn(action: String) {
+        if (!running) return
+        val wasOff = !screenInteractive
+        screenInteractive = true
+        if (!wasOff && action != Intent.ACTION_USER_PRESENT) return
+        Log.i(TAG, "亮屏($action)：立即打一枪要新点")
+        firePulse("亮屏")
+    }
+
+    private fun recreateClient(reason: String) {
+        Log.w(TAG, "重建 LocationClient: $reason")
+        destroyClient()
+        consecutiveMisses = 0
+        awaitingPulse = false
+        val app = appContext ?: return
+        createClient(app)
+        mainHandler.postDelayed({ if (running) firePulse("重建后") }, START_DELAY_MS)
+    }
+
+    private fun createClient(app: Application) {
+        val client = runCatching { LocationClient(app) }.getOrElse { e ->
+            Log.e(TAG, "创建 LocationClient 失败", e)
+            return
+        }
+        client.registerLocationListener(locationListener)
+        client.setLocOption(buildOnceOption())
+        locationClient = client
+        Log.i(TAG, "LocationClient 已创建 onceLocation=true scanSpan=0（脉冲模式）")
+    }
+
+    private fun destroyClient() {
+        val client = locationClient ?: return
+        if (baiduForegroundEnabled) {
+            runCatching { client.disableLocInForeground(true) }
+            baiduForegroundEnabled = false
+        }
+        runCatching { client.unRegisterLocationListener(locationListener) }
+        runCatching { if (client.isStarted) client.stop() }
+        locationClient = null
+    }
+
+    /** 单次定位：每次 start 出一新点 */
+    private fun buildOnceOption(): LocationClientOption {
+        return LocationClientOption().apply {
+            setLocationMode(LocationClientOption.LocationMode.Hight_Accuracy)
+            setCoorType("bd09ll")
+            setOpenGnss(true)
+            setIsNeedAddress(false)
+            setIsNeedLocationDescribe(false)
+            setNeedDeviceDirect(false)
+            setIgnoreKillProcess(true)
+            SetIgnoreCacheException(false)
+            setIsNeedAltitude(true)
+            setLocationNotify(false)
+            setIsEnableBeidouMode(true)
+            setWifiCacheTimeOut(5 * 60 * 1000)
+            setFirstLocType(LocationClientOption.FirstLocType.SPEED_IN_FIRST_LOC)
+            setOnceLocation(true)
+            setScanSpan(0)
+        }
+    }
+
+    private fun enableBaiduForegroundLocate(client: LocationClient) {
+        val app = appContext ?: return
+        if (baiduForegroundEnabled) return
+        runCatching {
+            ensureBaiduFgChannel(app)
+            client.enableLocInForeground(BAIDU_FG_NOTIFICATION_ID, buildBaiduFgNotification(app))
+            baiduForegroundEnabled = true
+            Log.i(TAG, "已开启百度前台定位通知 id=$BAIDU_FG_NOTIFICATION_ID")
+        }.onFailure {
+            Log.w(TAG, "enableLocInForeground 失败", it)
+        }
+    }
+
+    private fun ensureBaiduFgChannel(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(BAIDU_FG_CHANNEL_ID) != null) return
+        nm.createNotificationChannel(
+            NotificationChannel(
+                BAIDU_FG_CHANNEL_ID,
+                "百度定位",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply { setShowBadge(false) },
+        )
+    }
+
+    private fun buildBaiduFgNotification(context: Context): Notification {
+        val pi = PendingIntent.getActivity(
+            context,
+            0,
+            Intent(context, LocationActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(context, BAIDU_FG_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(context.getString(R.string.location_track_title))
+            .setContentText("正在获取最新位置")
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    private fun registerScreenReceiver(app: Application) {
+        if (screenReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            app.registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            app.registerReceiver(screenReceiver, filter)
+        }
+        screenReceiverRegistered = true
+    }
+
+    private fun unregisterScreenReceiver() {
+        if (!screenReceiverRegistered) return
+        val app = appContext ?: return
+        runCatching { app.unregisterReceiver(screenReceiver) }
+        screenReceiverRegistered = false
+    }
+
+    private fun isScreenInteractive(context: Context): Boolean {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        return pm?.isInteractive != false
+    }
+
+    private fun dispatch(location: BDLocation) {
+        listeners.toList().forEach { listener ->
+            runCatching { listener(location) }
+        }
     }
 
     fun isValid(location: BDLocation): Boolean {
@@ -252,41 +427,16 @@ object BaiduLocationReporter {
         if (abs(lat) < 1e-4 || abs(lng) < 1e-4) return false
         if (lat !in -90.0..90.0 || lng !in -180.0..180.0) return false
         return when (location.locType) {
-            LOC_TYPE_NETWORK_EXCEPTION,
-            LOC_TYPE_SERVER_ERROR,
+            BDLocation.TypeCriteriaException,
+            BDLocation.TypeNetWorkException,
+            BDLocation.TypeServerError,
+            LOC_TYPE_SERVER_PERMISSION,
             LOC_TYPE_LOCATION_SWITCH_OFF,
             -> false
             else -> true
         }
     }
 
-    private const val LOC_TYPE_NETWORK_EXCEPTION = 63
-    private const val LOC_TYPE_SERVER_ERROR = 67
+    private const val LOC_TYPE_SERVER_PERMISSION = 167
     private const val LOC_TYPE_LOCATION_SWITCH_OFF = 505
-
-    private fun buildForegroundNotification(context: Context): android.app.Notification {
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                LOCATION_CHANNEL_ID,
-                "定位服务",
-                NotificationManager.IMPORTANCE_LOW,
-            )
-            manager.createNotificationChannel(channel)
-        }
-        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            0,
-            launchIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(context, LOCATION_CHANNEL_ID)
-            .setContentTitle("定位中")
-            .setContentText("正在连续定位并上报位置")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
-    }
 }

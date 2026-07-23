@@ -16,12 +16,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
 /**
- * 启动百度连续定位（60 秒一次），收到定位后上报 receiveLocation。
+ * 进入定位页后绑定连续定位回调，约每 6 秒上报 receiveLocation。
  */
 object LocationReportCoordinator {
 
     private const val TAG = BaiduLocationReporter.TAG
-    private const val MIN_REPORT_INTERVAL_MS = 55_000L
+    /** 略小于 6s，避免回调稍早被当成重复上报 */
+    private const val MIN_REPORT_INTERVAL_MS = 4_500L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var uploadListener: ((BDLocation) -> Unit)? = null
@@ -31,7 +32,6 @@ object LocationReportCoordinator {
     private val reportLock = Any()
 
     private val _riskUpdates = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 1)
-    /** receiveLocation 成功且 data 非空时发出风险/定位描述文案 */
     val riskUpdates: SharedFlow<String> = _riskUpdates.asSharedFlow()
 
     fun ensureStarted(context: Context) {
@@ -50,7 +50,7 @@ object LocationReportCoordinator {
             }
             uploadListener = listener
             BaiduLocationReporter.addListener(listener)
-            Log.i(TAG, "定位上报已绑定百度连续定位")
+            Log.i(TAG, "定位上报已绑定，间隔约 ${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
         }
         BaiduLocationReporter.start(context.applicationContext)
     }
@@ -83,11 +83,13 @@ object LocationReportCoordinator {
             longitude = location.longitude,
             terCode = terCode,
         ).onSuccess { result ->
-            val data = result.data
-            if (!data.isNullOrBlank()) {
+            val data = result.data.orEmpty().trim()
+            if (data.isEmpty()) {
+                Log.i(TAG, "风险描述 data 为空，隐藏风险告警")
+            } else {
                 Log.i(TAG, "更新风险描述: $data")
-                _riskUpdates.tryEmit(data)
             }
+            _riskUpdates.tryEmit(data)
         }
     }
 

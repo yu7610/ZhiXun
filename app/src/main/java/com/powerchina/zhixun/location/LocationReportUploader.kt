@@ -3,10 +3,8 @@ package com.powerchina.zhixun.location
 import android.content.Context
 import android.util.Log
 import com.google.gson.JsonParser
-import com.powerchina.zhixun.network.OkHttpClientFactory
 import com.powerchina.zhixun.xiaozhi.XiaozhiVisionClient
 import okhttp3.FormBody
-import okhttp3.OkHttpClient
 import okhttp3.Request
 
 data class ReceiveLocationResult(
@@ -19,26 +17,14 @@ data class ReceiveLocationResult(
 
 /**
  * 定时上报设备经纬度：POST /api/AIEngineer/receiveLocation
+ *
+ * 使用首页 [OpenAppFenceApi.fetchAndSaveTokenOnHome] 已保存的 token。
  */
 object LocationReportUploader {
 
     private const val TAG = "LocationReport"
-    const val BASE_URL = "http://111.231.8.58:18099"
+    const val BASE_URL = OpenAppFenceApi.BASE_URL
     const val RECEIVE_LOCATION_URL = "$BASE_URL/api/AIEngineer/receiveLocation"
-
-    @Volatile
-    private var httpClient: OkHttpClient? = null
-
-    private fun client(context: Context): OkHttpClient {
-        return httpClient ?: synchronized(this) {
-            httpClient ?: OkHttpClientFactory.create(
-                context = context.applicationContext,
-                connectTimeoutSec = 15,
-                readTimeoutSec = 30,
-                writeTimeoutSec = 30,
-            ).also { httpClient = it }
-        }
-    }
 
     fun report(
         context: Context,
@@ -47,11 +33,12 @@ object LocationReportUploader {
         terCode: String,
         timestampSec: Long = System.currentTimeMillis() / 1000L,
     ): Result<ReceiveLocationResult> = runCatching {
+        val token = OpenAppFenceApi.requireSavedToken(context)
         val deviceCode = XiaozhiVisionClient.normalizeMacWithColons(terCode)
         require(deviceCode.isNotBlank()) { "未配置设备编号" }
         val body = FormBody.Builder()
-            .add("latitude", String.format("%.6f", latitude))
-            .add("longitude", String.format("%.6f", longitude))
+            .add("latitude", String.format(java.util.Locale.US, "%.6f", latitude))
+            .add("longitude", String.format(java.util.Locale.US, "%.6f", longitude))
             .add("terCode", deviceCode)
             .add("timestamp", timestampSec.toString())
             .build()
@@ -65,9 +52,11 @@ object LocationReportUploader {
         val request = Request.Builder()
             .url(RECEIVE_LOCATION_URL)
             .post(body)
+            .header("token", token)
+            .header("Authorization", "Bearer $token")
             .build()
 
-        client(context).newCall(request).execute().use { response ->
+        OpenAppFenceApi.httpClient(context).newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
             Log.i(TAG, "receiveLocation HTTP ${response.code} 响应: $raw")
             if (!response.isSuccessful) {

@@ -8,7 +8,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 
 /**
- * 应用级定位引导：在 Application 完成百度 SDK 初始化，并在有权限时预热定位客户端。
+ * 应用级：只做百度 SDK 初始化。
+ * 连续定位与 6s 上报由定位页（[LocationViewModel]）进入时启动、离开时停止。
  */
 object LocationBootstrap {
 
@@ -18,14 +19,17 @@ object LocationBootstrap {
         BaiduSdkInitializer.ensureInitialized(application)
     }
 
+    /**
+     * 进入定位页时调用：有权限则启动连续定位并绑定上报。
+     */
     fun startLocationIfPermitted(context: Context) {
         if (!hasLocationPermission(context)) {
-            Log.i(TAG, "定位预热跳过：无权限")
+            Log.i(TAG, "定位启动跳过：无权限")
             return
         }
         val app = context.applicationContext as Application
         if (BaiduSdkInitializer.resolveApiKey(app).isBlank()) {
-            Log.w(TAG, "定位预热跳过：AK 为空")
+            Log.w(TAG, "定位启动跳过：AK 为空")
             return
         }
         if (!BaiduSdkInitializer.isReady()) {
@@ -33,7 +37,7 @@ object LocationBootstrap {
         }
         BaiduLocationReporter.start(app)
         LocationReportCoordinator.ensureStarted(app)
-        Log.i(TAG, "定位预热已启动")
+        Log.i(TAG, "定位页连续定位已启动 interval=${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
     }
 
     fun hasLocationPermission(context: Context): Boolean {

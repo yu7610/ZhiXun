@@ -117,14 +117,16 @@ fun LocationScreen(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth(),
             ) {
-                RiskCard(
-                    title = uiState.riskTitle,
-                    message = uiState.riskMessage,
-                    active = uiState.riskActive,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                )
+                if (uiState.riskMessage.isNotBlank()) {
+                    RiskCard(
+                        title = uiState.riskTitle,
+                        message = uiState.riskMessage,
+                        active = uiState.riskActive,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
                 LocationBottomBar(
                     selected = uiState.tab,
                     onSelect = viewModel::selectTab,

@@ -15,7 +15,7 @@ class LocationActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        LocationBootstrap.startLocationIfPermitted(this)
+        // 定位在权限授予后由 LocationViewModel 启动，避免无权限空转
         enableEdgeToEdge()
         ScreenOnHelper.attach(this)
         XiaozhiWakeForegroundService.ensureStarted(this)

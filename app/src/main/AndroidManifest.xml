@@ -85,10 +85,22 @@
             android:label="@string/location_track_title"
             android:theme="@style/Theme.ZhiXun" />
 
+        <!-- 百度定位 SDK 独立进程服务（缺此声明则 LocationClient.start 无法真正启动） -->
+        <service
+            android:name="com.baidu.location.f"
+            android:enabled="true"
+            android:exported="false"
+            android:process=":remote" />
+
         <service
             android:name=".xiaozhi.wake.XiaozhiWakeForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <service
+            android:name=".location.LocationReportForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
 
         <receiver
             android:name=".physicalkey.RecordKeyBlockReceiver"
