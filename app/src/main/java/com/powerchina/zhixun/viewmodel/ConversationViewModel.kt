@@ -565,7 +565,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             Log.w(PhotoKeyLog.TAG, "拍照失败后暂无法开麦，待页面/连接就绪")
             return
         }
-        XiaozhiWakeForegroundService.claimMicrophoneForConversation(getApplication())
+        XiaozhiWakeForegroundService.claimMicrophoneForConversationAwait(getApplication())
         if (!ensureRecordingReady()) {
             transitionState(ConversationState.IDLE, reason)
             pendingAutoStart = true
@@ -3142,7 +3142,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         val t0 = System.currentTimeMillis()
         updateWakeHandoffUi()
         VoiceFlowLog.snapshot("handoff.begin", flowContext())
-        XiaozhiWakeForegroundService.claimMicrophoneForConversation(getApplication())
+        XiaozhiWakeForegroundService.claimMicrophoneForConversationAwait(getApplication())
         XiaozhiWakeCoordinator.refreshHandoffTimeout(getApplication())
         pauseWakeListening()
 

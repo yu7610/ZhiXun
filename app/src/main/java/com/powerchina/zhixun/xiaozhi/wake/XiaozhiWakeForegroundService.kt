@@ -19,8 +19,15 @@ import androidx.core.content.ContextCompat
 import com.powerchina.zhixun.MainActivity
 import com.powerchina.zhixun.R
 import com.powerchina.zhixun.data.ConfigManager
-import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
+import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
+import com.powerchina.zhixun.audio.AudioRecordEffects
+import java.util.concurrent.Executors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
+
 /**
  * 后台/息屏持续监听「你好，智询」的前台服务。
  */
@@ -44,7 +51,7 @@ class XiaozhiWakeForegroundService : Service() {
             ACTION_PAUSE -> {
                 pausedByConversation = true
                 Log.d(TAG, "onStartCommand PAUSE")
-                wakeListener?.pause()
+                pauseWakeListenerAsync(wakeListener)
                 return START_NOT_STICKY
             }
             ACTION_RESUME -> {
@@ -216,6 +223,22 @@ class XiaozhiWakeForegroundService : Service() {
         @Volatile
         private var micClaimedByConversation = false
 
+        /** AudioEffect/AudioRecord 释放可能卡住，勿在主线程 pause */
+        private val wakeAudioExecutor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "WakeAudioOps").apply { isDaemon = true }
+        }
+
+        private fun pauseWakeListenerAsync(listener: WakeListener?) {
+            if (listener == null) return
+            wakeAudioExecutor.execute {
+                try {
+                    listener.pause()
+                } catch (e: Exception) {
+                    Log.w(TAG, "异步 pause 失败", e)
+                }
+            }
+        }
+
         fun isRunning(): Boolean = instance != null
 
         fun isWakeListeningActive(): Boolean = instance?.wakeListener?.isActive == true
@@ -318,13 +341,62 @@ class XiaozhiWakeForegroundService : Service() {
             VoiceFlowLog.step("wakeService.mic", "releaseForConversation pauseListener")
             instance?.let { service ->
                 service.pausedByConversation = true
-                service.wakeListener?.pause()
+                pauseWakeListenerAsync(service.wakeListener)
             }
             appContext.startService(
                 Intent(appContext, XiaozhiWakeForegroundService::class.java).apply {
                     action = ACTION_PAUSE
                 },
             )
+        }
+
+        /**
+         * 对话开麦前调用：在 IO 线程 pause 唤醒采集，并等待 AudioRecord/AudioEffect 释放完成，
+         * 避免与 EnhancedAudioManager.startRecording 抢麦。
+         */
+        suspend fun releaseMicrophoneForConversationAwait(context: Context) {
+            val appContext = context.applicationContext
+            Log.d(TAG, "releaseMicrophoneForConversationAwait")
+            VoiceFlowLog.step("wakeService.mic", "releaseForConversation await")
+            val listener = instance?.let { service ->
+                service.pausedByConversation = true
+                service.wakeListener
+            }
+            withContext(Dispatchers.IO) {
+                if (listener != null) {
+                    suspendCoroutine { cont ->
+                        wakeAudioExecutor.execute {
+                            try {
+                                listener.pause()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "await pause 失败", e)
+                            } finally {
+                                cont.resume(Unit)
+                            }
+                        }
+                    }
+                }
+                AudioRecordEffects.awaitReleasesComplete()
+            }
+            appContext.startService(
+                Intent(appContext, XiaozhiWakeForegroundService::class.java).apply {
+                    action = ACTION_PAUSE
+                },
+            )
+        }
+
+        /** 对话开麦前声明占用，防止待机逻辑把麦克风抢回唤醒服务 */
+        fun claimMicrophoneForConversation(context: Context) {
+            micClaimedByConversation = true
+            VoiceFlowLog.step("wakeService.mic", "claimForConversation")
+            releaseMicrophoneForConversation(context)
+        }
+
+        /** 声明占用并等待唤醒侧麦克风释放完成 */
+        suspend fun claimMicrophoneForConversationAwait(context: Context) {
+            micClaimedByConversation = true
+            VoiceFlowLog.step("wakeService.mic", "claimForConversationAwait")
+            releaseMicrophoneForConversationAwait(context)
         }
 
         /** 结束语播放期间预初始化麦克风，缩短退下后恢复唤醒时间 */
@@ -355,13 +427,6 @@ class XiaozhiWakeForegroundService : Service() {
             }
         }
 
-        /** 对话开麦前声明占用，防止待机逻辑把麦克风抢回唤醒服务 */
-        fun claimMicrophoneForConversation(context: Context) {
-            micClaimedByConversation = true
-            VoiceFlowLog.step("wakeService.mic", "claimForConversation")
-            releaseMicrophoneForConversation(context)
-        }
-
         fun releaseConversationMicrophoneClaim(context: Context) {
             if (!micClaimedByConversation) return
             micClaimedByConversation = false
@@ -374,7 +439,7 @@ class XiaozhiWakeForegroundService : Service() {
             Log.d(TAG, "pauseListening")
             if (instance != null) {
                 instance?.pausedByConversation = true
-                instance?.wakeListener?.pause()
+                pauseWakeListenerAsync(instance?.wakeListener)
             } else {
                 appContext.startService(
                     Intent(appContext, XiaozhiWakeForegroundService::class.java).apply {

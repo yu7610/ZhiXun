@@ -29,9 +29,11 @@ import com.baidu.mapapi.map.MarkerOptions
 import com.baidu.mapapi.map.MyLocationConfiguration
 import com.baidu.mapapi.map.MyLocationData
 import com.baidu.mapapi.map.OverlayOptions
+import com.baidu.mapapi.map.PolygonOptions
 import com.baidu.mapapi.map.PolylineOptions
 import com.baidu.mapapi.map.Stroke
 import com.baidu.mapapi.model.LatLng
+import com.baidu.mapapi.model.LatLngBounds
 import kotlinx.coroutines.delay
 
 @Composable
@@ -102,25 +104,28 @@ fun BaiduMapContainer(
         uiState.fenceCenterLat,
         uiState.fenceCenterLng,
         uiState.fenceRadiusM,
+        uiState.fences,
         uiState.riskActive,
         baiduMap,
     ) {
         val map = baiduMap ?: return@LaunchedEffect
-        val lat = uiState.currentLat ?: return@LaunchedEffect
-        val lng = uiState.currentLng ?: return@LaunchedEffect
+        val lat = uiState.currentLat
+        val lng = uiState.currentLng
         delay(300)
 
         map.clear()
-        map.setMyLocationData(
-            MyLocationData.Builder()
-                .latitude(lat)
-                .longitude(lng)
-                .build(),
-        )
+        if (lat != null && lng != null) {
+            map.setMyLocationData(
+                MyLocationData.Builder()
+                    .latitude(lat)
+                    .longitude(lng)
+                    .build(),
+            )
+        }
 
         val overlays = mutableListOf<OverlayOptions>()
 
-        if (uiState.tab == LocationTab.TRACK) {
+        if (uiState.tab == LocationTab.TRACK && lat != null && lng != null) {
             uiState.startPoint?.let { start ->
                 overlays.add(
                     MarkerOptions()
@@ -140,7 +145,19 @@ fun BaiduMapContainer(
             }
         }
 
-        if (uiState.tab == LocationTab.FENCE || uiState.riskActive) {
+        if (uiState.tab == LocationTab.FENCE) {
+            uiState.fences.forEach { fence ->
+                val pts = fence.points.map { LatLng(it.latitude, it.longitude) }
+                if (pts.size >= 3) {
+                    overlays.add(
+                        PolygonOptions()
+                            .points(pts)
+                            .fillColor(0x33F44336)
+                            .stroke(Stroke(4, 0xFFE53935.toInt())),
+                    )
+                }
+            }
+        } else if (uiState.riskActive && lat != null && lng != null) {
             val centerLat = uiState.fenceCenterLat ?: lat
             val centerLng = uiState.fenceCenterLng ?: lng
             overlays.add(
@@ -154,12 +171,32 @@ fun BaiduMapContainer(
 
         overlays.forEach { map.addOverlay(it) }
 
-        val zoom = when (uiState.tab) {
-            LocationTab.FENCE -> 17f
-            LocationTab.TRACK -> if (uiState.trackPoints.size > 1) 16f else 18f
-            else -> 18f
+        when (uiState.tab) {
+            LocationTab.FENCE -> {
+                val allPts = uiState.fences.flatMap { fence ->
+                    fence.points.map { LatLng(it.latitude, it.longitude) }
+                }
+                if (allPts.size >= 2) {
+                    val bounds = LatLngBounds.Builder().apply {
+                        allPts.forEach { include(it) }
+                    }.build()
+                    map.animateMapStatus(MapStatusUpdateFactory.newLatLngBounds(bounds))
+                } else if (lat != null && lng != null) {
+                    map.animateMapStatus(MapStatusUpdateFactory.newLatLngZoom(LatLng(lat, lng), 17f))
+                }
+            }
+            LocationTab.TRACK -> {
+                if (lat != null && lng != null) {
+                    val zoom = if (uiState.trackPoints.size > 1) 16f else 18f
+                    map.animateMapStatus(MapStatusUpdateFactory.newLatLngZoom(LatLng(lat, lng), zoom))
+                }
+            }
+            else -> {
+                if (lat != null && lng != null) {
+                    map.animateMapStatus(MapStatusUpdateFactory.newLatLngZoom(LatLng(lat, lng), 18f))
+                }
+            }
         }
-        map.animateMapStatus(MapStatusUpdateFactory.newLatLngZoom(LatLng(lat, lng), zoom))
     }
 
     AndroidView(

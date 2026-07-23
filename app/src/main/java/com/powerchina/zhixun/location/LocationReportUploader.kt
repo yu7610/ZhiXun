@@ -9,13 +9,21 @@ import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
+data class ReceiveLocationResult(
+    val code: Int?,
+    val msg: String?,
+    /** 接口返回的定位/风险描述文案 */
+    val data: String?,
+    val raw: String,
+)
+
 /**
  * 定时上报设备经纬度：POST /api/AIEngineer/receiveLocation
  */
 object LocationReportUploader {
 
     private const val TAG = "LocationReport"
-    const val BASE_URL = "http://111.231.8.58:18089"
+    const val BASE_URL = "http://111.231.8.58:18099"
     const val RECEIVE_LOCATION_URL = "$BASE_URL/api/AIEngineer/receiveLocation"
 
     @Volatile
@@ -38,7 +46,7 @@ object LocationReportUploader {
         longitude: Double,
         terCode: String,
         timestampSec: Long = System.currentTimeMillis() / 1000L,
-    ): Result<String> = runCatching {
+    ): Result<ReceiveLocationResult> = runCatching {
         val deviceCode = XiaozhiVisionClient.normalizeMacWithColons(terCode)
         require(deviceCode.isNotBlank()) { "未配置设备编号" }
         val body = FormBody.Builder()
@@ -65,13 +73,14 @@ object LocationReportUploader {
             if (!response.isSuccessful) {
                 throw IllegalStateException("HTTP ${response.code}: $raw")
             }
-            val code = runCatching {
-                JsonParser.parseString(raw).asJsonObject.get("code")?.asInt
-            }.getOrNull()
+            val json = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
+            val code = json?.get("code")?.asInt
+            val msg = json?.get("msg")?.takeIf { !it.isJsonNull }?.asString
+            val data = json?.get("data")?.takeIf { !it.isJsonNull }?.asString?.trim()?.takeIf { it.isNotEmpty() }
             if (code != null && code != 200 && code != 0) {
                 throw IllegalStateException("业务错误 code=$code: $raw")
             }
-            raw
+            ReceiveLocationResult(code = code, msg = msg, data = data, raw = raw)
         }
     }.onFailure { e ->
         Log.w(TAG, "receiveLocation 失败", e)

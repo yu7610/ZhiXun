@@ -8,35 +8,34 @@ import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 import com.powerchina.zhixun.xiaozhi.XiaozhiAppEvents
 
 /**
- * 物理录音键（keyCode=138）：待机时进入聆听；聆听/说话时结束对话进入待机。
+ * 物理录音键（keyCode=138）：短按抬起进入/结束对话；长按仅拦截系统，不做业务处理。
  *
- * OEM 可能同时发 LONG_PRESS 广播与 KeyEvent ACTION_UP，需去重。
+ * OEM 可能同时发 LONG_PRESS 广播与 KeyEvent ACTION_UP，长按后需抑制随后 KEY_UP。
  */
 object RecordKeyHandler {
 
     private const val DEBOUNCE_MS = 800L
-    /** LONG_PRESS 已处理后，忽略随后 KEY_UP 释放（同一次按压） */
+    /** 长按已拦截后，忽略随后 KEY_UP（同一次按压） */
     private const val LONG_PRESS_SUPPRESS_KEY_UP_MS = 1500L
 
     private var lastHandleAtMs = 0L
-    private var longPressHandledAtMs = 0L
+    private var longPressInterceptedAtMs = 0L
 
-    fun handleLongPress(context: Context) {
-        val now = System.currentTimeMillis()
-        if (now - lastHandleAtMs < DEBOUNCE_MS) {
-            Log.d(VideoKeyReceiver.TAG, "录音键 LONG_PRESS debounce 忽略")
-            return
-        }
-        lastHandleAtMs = now
-        longPressHandledAtMs = now
-        Log.i(VideoKeyReceiver.TAG, "keyCode=138 录音键 LONG_PRESS -> 切换对话")
-        dispatchVoiceKey(context)
+    /** 长按广播：只记录时间戳，不触发对话 */
+    fun markLongPressIntercepted() {
+        longPressInterceptedAtMs = System.currentTimeMillis()
+        Log.i(VideoKeyReceiver.TAG, "keyCode=138 录音键 LONG_PRESS 已拦截，不做处理")
+    }
+
+    @Deprecated("长按不再触发对话，请用 markLongPressIntercepted()", ReplaceWith("markLongPressIntercepted()"))
+    fun handleLongPress(@Suppress("UNUSED_PARAMETER") context: Context) {
+        markLongPressIntercepted()
     }
 
     fun handleKeyUp(context: Context) {
         val now = System.currentTimeMillis()
-        if (now - longPressHandledAtMs < LONG_PRESS_SUPPRESS_KEY_UP_MS) {
-            Log.d(VideoKeyReceiver.TAG, "录音键 KEY_UP 已由 LONG_PRESS 处理，忽略")
+        if (now - longPressInterceptedAtMs < LONG_PRESS_SUPPRESS_KEY_UP_MS) {
+            Log.d(VideoKeyReceiver.TAG, "录音键 KEY_UP 跟随长按，忽略")
             return
         }
         if (now - lastHandleAtMs < DEBOUNCE_MS) {

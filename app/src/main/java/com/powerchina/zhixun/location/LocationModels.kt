@@ -5,6 +5,13 @@ data class TrackPoint(
     val longitude: Double,
 )
 
+/** 接口返回的围栏（当前支持多边形） */
+data class FenceArea(
+    val id: String,
+    val name: String,
+    val points: List<TrackPoint>,
+)
+
 data class LocationUiState(
     val tab: LocationTab = LocationTab.LOCATE,
     val coordinateText: String = "--",
@@ -20,6 +27,8 @@ data class LocationUiState(
     val fenceCenterLat: Double? = null,
     val fenceCenterLng: Double? = null,
     val fenceRadiusM: Double = 120.0,
+    /** 围栏 Tab：来自 geofences/byDevices */
+    val fences: List<FenceArea> = emptyList(),
     val locationReady: Boolean = false,
     val errorMessage: String? = null,
 )

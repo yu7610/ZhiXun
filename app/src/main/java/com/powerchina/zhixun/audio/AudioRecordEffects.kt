@@ -3,11 +3,14 @@ package com.powerchina.zhixun.audio
 import android.media.AudioRecord
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 为 AudioRecord 启用系统 AEC/NS（设备支持时）。
@@ -20,10 +23,19 @@ class AudioRecordEffects private constructor(
     val nsEnabled: Boolean get() = noiseSuppressor?.enabled == true
 
     /**
-     * 释放 AEC/NS。须在 [AudioRecord.release] 之前调用；
-     * [android.media.audiofx.AudioEffect.release] 的 native 实现可能长时间阻塞，调用方勿在主线程执行。
+     * 释放 AEC/NS。须在 [AudioRecord.release] 之前调用。
+     * 禁止在主线程调用 native_release（部分机型会卡住数秒导致 ANR）。
      */
     fun release() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Log.w(TAG, "release() 在主线程调用，改投 IO")
+            releaseScope.launch { releaseInternal() }
+            return
+        }
+        releaseInternal()
+    }
+
+    private fun releaseInternal() {
         try {
             acousticEchoCanceler?.release()
         } catch (_: Exception) {
@@ -35,9 +47,14 @@ class AudioRecordEffects private constructor(
     }
 
     companion object {
+        private const val TAG = "AudioRecordEffects"
+
         /** 串行化释放，避免多路 AudioEffect/AudioRecord 并发 teardown 卡死 HAL */
         private val releaseScope =
             CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+
+        @Volatile
+        private var drainJob: Job? = null
 
         /**
          * 在后台按正确顺序释放效果器与 [AudioRecord]。
@@ -45,9 +62,11 @@ class AudioRecordEffects private constructor(
          */
         fun releaseAsync(effects: AudioRecordEffects?, record: AudioRecord?) {
             if (effects == null && record == null) return
-            releaseScope.launch {
+            val previous = drainJob
+            drainJob = releaseScope.launch {
+                previous?.join()
                 try {
-                    effects?.release()
+                    effects?.releaseInternal()
                 } catch (_: Exception) {
                 }
                 try {
@@ -58,6 +77,15 @@ class AudioRecordEffects private constructor(
                     record?.release()
                 } catch (_: Exception) {
                 }
+            }
+        }
+
+        /** 等待后台释放队列排空，供对话开麦前调用（勿在主线程长时间阻塞 UI） */
+        suspend fun awaitReleasesComplete(timeoutMs: Long = 5_000L) {
+            val job = drainJob ?: return
+            val ok = withTimeoutOrNull(timeoutMs) { job.join() } != null
+            if (!ok) {
+                Log.w(TAG, "awaitReleasesComplete 超时 ${timeoutMs}ms")
             }
         }
 

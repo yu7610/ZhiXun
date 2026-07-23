@@ -10,6 +10,9 @@ import com.powerchina.zhixun.data.ConfigManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -26,6 +29,10 @@ object LocationReportCoordinator {
     @Volatile
     private var lastReportTimeMs: Long = 0L
     private val reportLock = Any()
+
+    private val _riskUpdates = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 1)
+    /** receiveLocation 成功且 data 非空时发出风险/定位描述文案 */
+    val riskUpdates: SharedFlow<String> = _riskUpdates.asSharedFlow()
 
     fun ensureStarted(context: Context) {
         if (!hasLocationPermission(context)) {
@@ -75,7 +82,13 @@ object LocationReportCoordinator {
             latitude = location.latitude,
             longitude = location.longitude,
             terCode = terCode,
-        )
+        ).onSuccess { result ->
+            val data = result.data
+            if (!data.isNullOrBlank()) {
+                Log.i(TAG, "更新风险描述: $data")
+                _riskUpdates.tryEmit(data)
+            }
+        }
     }
 
     private fun hasLocationPermission(context: Context): Boolean {
