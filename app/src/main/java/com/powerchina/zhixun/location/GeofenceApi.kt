@@ -2,6 +2,8 @@ package com.powerchina.zhixun.location
 
 import android.content.Context
 import android.util.Log
+import com.baidu.mapapi.model.LatLng
+import com.baidu.mapapi.utils.CoordinateConverter
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
@@ -25,6 +27,7 @@ data class GeofencesByDevicesResult(
  * 按设备查询围栏：POST /api/AIEngineer/geofences/byDevices
  *
  * 使用首页已保存的 generateToken data 作为 token，再带 header + 设备号 body 请求本接口。
+ * 接口坐标为 WGS84，解析后转为百度 BD09LL 再交给地图绘制。
  */
 object GeofenceApi {
 
@@ -85,7 +88,11 @@ object GeofenceApi {
                 throw IllegalStateException("业务错误 code=$code: $raw")
             }
             val fences = parseFences(dataElement)
-            Log.i(TAG, "解析围栏 ${fences.size} 个: ${fences.map { "${it.id}/${it.name}/${it.points.size}pts" }}")
+            Log.i(
+                TAG,
+                "解析围栏(WGS84→BD09) ${fences.size} 个: " +
+                    fences.map { "${it.id}/${it.name}/${it.points.size}pts" },
+            )
             GeofencesByDevicesResult(code = code, msg = msg, data = data, raw = raw, fences = fences)
         }
     }.onFailure { e ->
@@ -93,7 +100,7 @@ object GeofenceApi {
     }
 
     /**
-     * 解析 data：GeoJSON Polygon，coordinates 为 [lng, lat]。
+     * 解析 data：GeoJSON Polygon，coordinates 为 WGS84 [lng, lat]，输出 BD09LL。
      */
     private fun parseFences(dataElement: JsonElement?): List<FenceArea> {
         if (dataElement == null || dataElement.isJsonNull) return emptyList()
@@ -118,8 +125,8 @@ object GeofenceApi {
             "point" -> {
                 val coords = geometry.getAsJsonArray("coordinates") ?: return null
                 if (coords.size() < 2) return null
-                // GeoJSON Point: [lng, lat]
-                listOf(TrackPoint(latitude = coords[1].asDouble, longitude = coords[0].asDouble))
+                // GeoJSON Point: WGS84 [lng, lat] → BD09
+                listOfNotNull(wgs84ToBd09(lat = coords[1].asDouble, lng = coords[0].asDouble))
             }
             else -> emptyList()
         }
@@ -136,7 +143,7 @@ object GeofenceApi {
         return FenceArea(id = id, name = name, points = points)
     }
 
-    /** GeoJSON Polygon coordinates: [[[lng,lat],...]] 取外环 */
+    /** GeoJSON Polygon coordinates: WGS84 [[[lng,lat],...]] 取外环并转 BD09 */
     private fun parsePolygonRing(coordinates: JsonArray?): List<TrackPoint> {
         if (coordinates == null || coordinates.size() == 0) return emptyList()
         val ring = coordinates[0].asJsonArray
@@ -146,7 +153,8 @@ object GeofenceApi {
             if (pair.size() < 2) continue
             val lng = pair[0].asDouble
             val lat = pair[1].asDouble
-            points.add(TrackPoint(latitude = lat, longitude = lng))
+            val bd09 = wgs84ToBd09(lat = lat, lng = lng) ?: continue
+            points.add(bd09)
         }
         // 去掉首尾重复闭合点，百度 Polygon 自行闭合
         if (points.size >= 2) {
@@ -157,5 +165,19 @@ object GeofenceApi {
             }
         }
         return points
+    }
+
+    /** WGS84 → 百度经纬度 BD09LL（官方 CoordinateConverter） */
+    private fun wgs84ToBd09(lat: Double, lng: Double): TrackPoint? {
+        return runCatching {
+            val converted = CoordinateConverter()
+                .from(CoordinateConverter.CoordType.GPS)
+                .coord(LatLng(lat, lng))
+                .convert()
+                ?: return null
+            TrackPoint(latitude = converted.latitude, longitude = converted.longitude)
+        }.onFailure {
+            Log.w(TAG, "WGS84→BD09 失败 lat=$lat lng=$lng", it)
+        }.getOrNull()
     }
 }
