@@ -492,8 +492,9 @@ private fun statusLabel(
     ) {
         return stringResource(R.string.status_speaking)
     }
+    // 交接中麦克风尚未真正开麦：勿显示「聆听中」，否则偶发「显示聆听中但说了没识别」
     if (isWakeHandoffActive && state == ConversationState.IDLE && isConnected && !isWakeGreetingPlaying) {
-        return stringResource(R.string.status_listening)
+        return stringResource(R.string.status_connecting)
     }
     return when (state) {
         ConversationState.LISTENING -> stringResource(R.string.status_listening)
