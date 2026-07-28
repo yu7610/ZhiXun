@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.powerchina.zhixun.data.ConfigManager
@@ -55,6 +56,15 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val configManager = remember { ConfigManager(context) }
+    val appVersionLabel = remember(context) {
+        runCatching {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val name = info.versionName ?: "—"
+            @Suppress("DEPRECATION")
+            val code = info.versionCode
+            "v$name ($code)"
+        }.getOrElse { "—" }
+    }
     var editedConfig by remember {
         mutableStateOf(
             if (config.otaUrl.isBlank() && config.websocketUrl.isBlank()) {
@@ -228,9 +238,17 @@ fun SettingsScreen(
                         )
                     }
                 }
-                
+
                 item {
-                    Spacer(modifier = Modifier.height(32.dp))
+                    Text(
+                        text = "版本 $appVersionLabel",
+                        fontSize = 13.sp,
+                        color = AethericColors.OnSurfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp, bottom = 24.dp),
+                        textAlign = TextAlign.Center,
+                    )
                 }
             }
         }

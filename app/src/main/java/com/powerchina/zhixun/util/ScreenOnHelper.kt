@@ -8,16 +8,13 @@ import android.view.WindowManager
 import java.lang.ref.WeakReference
 
 /**
- * 有用户操作时保持亮屏；连续 [IDLE_SCREEN_OFF_MS] 无操作后允许系统息屏。
- * 待机模式下：10s 变暗，20s 黑屏（最低亮度 + 允许息屏）。
+ * 屏幕策略：
+ * - **非待机（聊天/聆听/说话等）**：始终 [FLAG_KEEP_SCREEN_ON]，不休眠
+ * - **待机**：10s 变暗，20s 黑屏并允许系统息屏；触摸后恢复
  */
 object ScreenOnHelper {
 
-    // 暂时注释掉屏幕亮度 / 常亮 / 熄屏控制，恢复时改为 true
-    private const val SCREEN_CONTROL_ENABLED = false
-
     private const val TAG = "ScreenOnHelper"
-    private const val IDLE_SCREEN_OFF_MS = 5 * 60 * 1000L
     private const val STANDBY_DIM_MS = 10_000L
     private const val STANDBY_OFF_MS = 20_000L
     private const val STANDBY_DIM_BRIGHTNESS = 0.12f
@@ -26,7 +23,6 @@ object ScreenOnHelper {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var attachedActivity: WeakReference<Activity>? = null
-    private var idleRunnable: Runnable? = null
     private var standbyDimRunnable: Runnable? = null
     private var standbyOffRunnable: Runnable? = null
 
@@ -50,16 +46,14 @@ object ScreenOnHelper {
     }
 
     fun attach(activity: Activity) {
-        if (!SCREEN_CONTROL_ENABLED) return
         detach(activity, clearFlag = false)
         attachedActivity = WeakReference(activity)
+        // 默认常亮；仅 enterStandbyMode 后才允许息屏
         keepScreenOn(activity)
-        scheduleIdleScreenOff(activity)
-        Log.d(TAG, "attach ${activity.javaClass.simpleName}，${IDLE_SCREEN_OFF_MS / 1000}s 无操作允许息屏")
+        Log.d(TAG, "attach ${activity.javaClass.simpleName}，非待机常亮")
     }
 
     fun onUserInteraction(activity: Activity) {
-        if (!SCREEN_CONTROL_ENABLED) return
         val current = attachedActivity?.get() ?: activity
         if (current != activity) return
         if (inStandbyMode) {
@@ -74,13 +68,13 @@ object ScreenOnHelper {
             return
         }
         keepScreenOn(activity)
-        scheduleIdleScreenOff(activity)
     }
 
     /** 进入待机 UI：启动 10s 变暗 / 20s 黑屏计时 */
     fun enterStandbyMode(activity: Activity) {
-        if (!SCREEN_CONTROL_ENABLED) return
-        if (attachedActivity?.get() != activity) return
+        if (attachedActivity?.get() != activity) {
+            attachedActivity = WeakReference(activity)
+        }
         val firstEnter = !inStandbyMode
         inStandbyMode = true
         if (firstEnter) {
@@ -91,23 +85,22 @@ object ScreenOnHelper {
         }
     }
 
-    /** 离开待机 UI：恢复亮度并回到常亮策略 */
+    /** 离开待机 UI：恢复亮度并常亮（聊天中不休眠） */
     fun exitStandbyMode(activity: Activity) {
-        if (!SCREEN_CONTROL_ENABLED) return
-        if (!inStandbyMode) return
+        if (!inStandbyMode) {
+            keepScreenOn(activity)
+            return
+        }
         if (attachedActivity?.get() != activity) return
         inStandbyMode = false
         cancelStandbyTimers()
         restoreStandbyBrightness(activity)
         keepScreenOn(activity)
-        scheduleIdleScreenOff(activity)
-        Log.i(TAG, "退出待机息屏计时")
+        Log.i(TAG, "退出待机 → 聊天常亮")
     }
 
     fun detach(activity: Activity, clearFlag: Boolean = true) {
-        if (!SCREEN_CONTROL_ENABLED) return
         if (attachedActivity?.get() == activity) {
-            cancelIdleTimer()
             cancelStandbyTimers()
             inStandbyMode = false
             standbyPhase = StandbyPhase.NORMAL
@@ -184,26 +177,6 @@ object ScreenOnHelper {
         activity.window.attributes = lp
         savedWindowBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         standbyPhase = StandbyPhase.NORMAL
-    }
-
-    private fun scheduleIdleScreenOff(activity: Activity) {
-        if (inStandbyMode) return
-        cancelIdleTimer()
-        val runnable = Runnable {
-            val stillAttached = attachedActivity?.get()
-            if (stillAttached == null || stillAttached != activity || activity.isFinishing || inStandbyMode) {
-                return@Runnable
-            }
-            allowScreenSleep(activity)
-            Log.i(TAG, "${IDLE_SCREEN_OFF_MS / 1000}s 无操作，允许息屏 ${activity.javaClass.simpleName}")
-        }
-        idleRunnable = runnable
-        mainHandler.postDelayed(runnable, IDLE_SCREEN_OFF_MS)
-    }
-
-    private fun cancelIdleTimer() {
-        idleRunnable?.let { mainHandler.removeCallbacks(it) }
-        idleRunnable = null
     }
 
     private fun keepScreenOn(activity: Activity) {

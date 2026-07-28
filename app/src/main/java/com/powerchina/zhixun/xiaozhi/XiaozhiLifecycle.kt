@@ -32,6 +32,11 @@ object XiaozhiLifecycle {
                     Log.d(TAG, "唤醒交接中，不恢复后台监听")
                     return
                 }
+                // 对话仍占用麦克风时勿抢麦（真正退后台由 pauseConversationForUi 先释放）
+                if (XiaozhiWakeForegroundService.isConversationMicClaimed()) {
+                    Log.d(TAG, "对话占用麦克风，不恢复后台唤醒监听")
+                    return
+                }
                 XiaozhiWakeForegroundService.ensureStarted(application)
                 XiaozhiWakeForegroundService.ensureListeningActive(application)
             }

@@ -152,8 +152,9 @@ fun ConversationScreen(
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_RESUME -> viewModel.setConversationUiActive(true)
-                Lifecycle.Event.ON_PAUSE -> viewModel.setConversationUiActive(false)
+                // 用 START/STOP：ON_PAUSE 会在权限框/短暂盖层时触发，误杀「聆听中」
+                Lifecycle.Event.ON_START -> viewModel.setConversationUiActive(true)
+                Lifecycle.Event.ON_STOP -> viewModel.setConversationUiActive(false)
                 else -> Unit
             }
         }

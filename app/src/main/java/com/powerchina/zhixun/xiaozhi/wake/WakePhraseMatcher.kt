@@ -57,6 +57,16 @@ object WakePhraseMatcher {
         return false
     }
 
+    /**
+     * 助手结束语（LLM 主动道别）：如「那我就先退下了，拜拜」。
+     * 与用户「退下」指令分开：避免把「随时找我」等续聊话术误判为结束。
+     */
+    fun isAssistantFarewellPhrase(text: String): Boolean {
+        val normalized = normalize(text)
+        if (normalized.isEmpty()) return false
+        return ASSISTANT_FAREWELL_MARKERS.any { normalized.contains(it) }
+    }
+
     private val SESSION_END_KEYWORDS = listOf(
         "退下",
         "退出",
@@ -65,6 +75,25 @@ object WakePhraseMatcher {
         "别说了",
         "停止对话",
         "退下吧",
+    )
+
+    private val ASSISTANT_FAREWELL_MARKERS = listOf(
+        "退下了",
+        "先退下",
+        "我退下",
+        "那我退下",
+        "我就退下",
+        "退下吧",
+        "拜拜",
+        "再见",
+        "告辞",
+        "先走了",
+        "我先走",
+        "结束对话",
+        "不聊了",
+        "有需要再找我",
+        "有需要再叫我",
+        "需要再唤醒我",
     )
 
     /** 「退下」首字的同音/近音误识（tuì/tuī/tuǐ 等） */
