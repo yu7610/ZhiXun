@@ -9,7 +9,7 @@ import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeCoordinator
 import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /**
- * 应用生命周期：前台保持/恢复连接，退后台也不断开 WebSocket。
+ * 应用生命周期：前台保持/恢复连接，退后台也不断开 MQTT。
  */
 object XiaozhiLifecycle {
 
@@ -26,7 +26,7 @@ object XiaozhiLifecycle {
             }
 
             override fun onStop(owner: LifecycleOwner) {
-                Log.d(TAG, "应用进入后台，保持 WebSocket 连接")
+                Log.d(TAG, "应用进入后台，保持 MQTT 连接")
                 XiaozhiSessionManager.getInstance(application).ensureConnected()
                 if (XiaozhiWakeCoordinator.isWakeHandoffInProgress()) {
                     Log.d(TAG, "唤醒交接中，不恢复后台监听")

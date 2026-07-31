@@ -62,7 +62,7 @@ class OtaService(context: Context) {
                     val responseBody = response.body?.string()
                     if (responseBody != null) {
                         Log.d(TAG, "OTA响应成功 - 状态码: ${response.code}")
-                        Log.d(TAG, "响应体数据: $responseBody")
+                        Log.e(TAG, "响应体数据: $responseBody")
                         val otaResponse = json.decodeFromString(OtaResponse.serializer(), responseBody)
                         Result.success(otaResponse)
                     } else {

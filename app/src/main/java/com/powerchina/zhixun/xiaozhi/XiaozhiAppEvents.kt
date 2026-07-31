@@ -22,6 +22,11 @@ data class PhotoResult(
     val uploadResult: Result<Unit>,
     /** MCP 拍照完成、识别尚未返回时先发预览 */
     val captureOnly: Boolean = false,
+    /**
+     * 服务端未下发 tools/call 时的本地结果文案：
+     * UI 直接展示，并用系统 TTS 播报（不再等待小智下行语音）。
+     */
+    val localResultText: String? = null,
 )
 
 /**
@@ -104,6 +109,14 @@ object XiaozhiAppEvents {
     var photoSessionActive: Boolean = false
         private set
 
+    /**
+     * 上传并回传 MCP 结果后置 true，允许播放一轮结果 TTS。
+     * 必须在 sendMcpToolResult 之前置位，避免结果 TTS 比 UI 回调更早到达被误丢弃。
+     */
+    @Volatile
+    var photoResultTtsArmed: Boolean = false
+        private set
+
     @Volatile
     private var photoSessionGeneration: Long = 0L
 
@@ -121,10 +134,20 @@ object XiaozhiAppEvents {
     fun beginPhotoSession(): Long {
         photoSessionGeneration++
         photoSessionActive = true
+        photoResultTtsArmed = false
         mainHandler.removeCallbacks(photoSessionTimeoutRunnable)
         mainHandler.postDelayed(photoSessionTimeoutRunnable, PHOTO_SESSION_TIMEOUT_MS)
         Log.i(PhotoKeyLog.TAG, "beginPhotoSession gen=$photoSessionGeneration")
         return photoSessionGeneration
+    }
+
+    fun armPhotoResultTts() {
+        photoResultTtsArmed = true
+        Log.i(PhotoKeyLog.TAG, "armPhotoResultTts gen=$photoSessionGeneration")
+    }
+
+    fun clearPhotoResultTtsArm() {
+        photoResultTtsArmed = false
     }
 
     fun currentPhotoSessionGeneration(): Long = photoSessionGeneration
@@ -133,6 +156,8 @@ object XiaozhiAppEvents {
         recoverUi: Boolean = false,
         recoverMessage: String? = null,
         sessionGeneration: Long? = null,
+        /** false：仅结束会话（如本地已展示/播报），不进入「等待服务端 TTS」 */
+        awaitServerTts: Boolean = true,
     ) {
         if (sessionGeneration != null && sessionGeneration != photoSessionGeneration) {
             Log.d(
@@ -153,14 +178,16 @@ object XiaozhiAppEvents {
         if (wasActive) {
             mainHandler.removeCallbacks(photoSessionTimeoutRunnable)
             photoSessionActive = false
+            clearPhotoResultTtsArm()
             SharedCameraCapture.forceReset()
             SharedCameraCapture.releasePreWarm()
         }
         Log.i(
             PhotoKeyLog.TAG,
-            "endPhotoSession recoverUi=$recoverUi wasActive=$wasActive gen=$photoSessionGeneration",
+            "endPhotoSession recoverUi=$recoverUi awaitTts=$awaitServerTts " +
+                "wasActive=$wasActive gen=$photoSessionGeneration",
         )
-        if (wasActive && !recoverUi) {
+        if (wasActive && !recoverUi && awaitServerTts) {
             val successHandler = photoRoundSuccessHandler
             if (Looper.myLooper() == Looper.getMainLooper()) {
                 successHandler?.invoke()
@@ -295,6 +322,7 @@ object XiaozhiAppEvents {
             Log.i(
                 PhotoKeyLog.TAG,
                 "emitPhotoResult file=${result.file?.name} captureOnly=${result.captureOnly} " +
+                    "local=${result.localResultText != null} " +
                     "success=${result.uploadResult.isSuccess} emitted=$emitted",
             )
             emitted

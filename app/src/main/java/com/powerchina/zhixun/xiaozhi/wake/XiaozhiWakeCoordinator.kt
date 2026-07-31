@@ -142,7 +142,7 @@ object XiaozhiWakeCoordinator {
 
     private fun isConfigReady(context: Context): Boolean {
         val cfg = ConfigManager(context).loadConfig()
-        val hasEndpoint = cfg.otaUrl.isNotBlank() || cfg.websocketUrl.isNotBlank()
+        val hasEndpoint = cfg.otaUrl.isNotBlank() || cfg.mqtt.isReady()
         return hasEndpoint && cfg.macAddress.isNotBlank() && cfg.token.isNotBlank()
     }
 

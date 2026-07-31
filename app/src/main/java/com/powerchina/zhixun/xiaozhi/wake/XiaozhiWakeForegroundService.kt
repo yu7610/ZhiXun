@@ -120,7 +120,7 @@ class XiaozhiWakeForegroundService : Service() {
         wakeListener?.let { return it }
         val callback = { XiaozhiWakeCoordinator.onWakeDetected(applicationContext) }
         val cfg = ConfigManager(applicationContext).loadConfig()
-        val preferServer = cfg.websocketUrl.isNotBlank() || cfg.otaUrl.isNotBlank()
+        val preferServer = cfg.mqtt.isReady() || cfg.otaUrl.isNotBlank()
         wakeListener = when {
             OfflineWakeDetector.isAvailable() -> {
                 Log.i(TAG, "引擎=离线KWS (sherpa-onnx，待机不联网)")

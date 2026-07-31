@@ -67,11 +67,10 @@ fun SettingsScreen(
     }
     var editedConfig by remember {
         mutableStateOf(
-            if (config.otaUrl.isBlank() && config.websocketUrl.isBlank()) {
+            if (config.otaUrl.isBlank() && !config.mqtt.isReady()) {
                 config.copy(
                     name = "Android",
                     otaUrl = "https://api.tenclass.net/xiaozhi/ota/",
-                    websocketUrl = "wss://api.tenclass.net/xiaozhi/v1/",
                     macAddress = (1..6).joinToString(":") {
                         "%02x".format((0..255).random())
                     }
@@ -199,13 +198,6 @@ fun SettingsScreen(
                             value = editedConfig.otaUrl,
                             onValueChange = { editedConfig = editedConfig.copy(otaUrl = it) },
                             placeholder = "e.g., https://api.aura-ai.com"
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        SettingsInput(
-                            label = "WSS地址",
-                            value = editedConfig.websocketUrl,
-                            onValueChange = { editedConfig = editedConfig.copy(websocketUrl = it) },
-                            placeholder = "WSS地址"
                         )
                         Spacer(modifier = Modifier.height(16.dp))
                         SettingsInput(

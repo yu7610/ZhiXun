@@ -14,7 +14,7 @@ import com.google.gson.JsonObject
 import com.powerchina.zhixun.audio.utils.OpusEncoder
 import com.powerchina.zhixun.audio.AudioRecordEffects
 import com.powerchina.zhixun.data.ConfigManager
-import com.powerchina.zhixun.network.WebSocketEvent
+import com.powerchina.zhixun.network.MqttUdpEvent
 import com.powerchina.zhixun.xiaozhi.XiaozhiSessionManager
 import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 import kotlinx.coroutines.CoroutineScope
@@ -53,7 +53,7 @@ class ServerWakeDetector(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessionManager =
         XiaozhiSessionManager.getInstance(appContext as Application)
-    private val webSocket = sessionManager.webSocketManager
+    private val mqtt = sessionManager.mqttManager
 
     @Volatile
     private var active = false
@@ -146,8 +146,8 @@ class ServerWakeDetector(
             Log.d(TAG, "问候 TTS 交接中，pause 不发送 stopListening")
         } else if (!XiaozhiWakeForegroundService.isConversationMicClaimed()) {
             // abort 丢弃唤醒期间已上行的音频，避免唤醒前说的话被服务端 STT 提交后误回复
-            webSocket.sendAbort("wake_pause")
-            webSocket.sendStopListening()
+            mqtt.sendAbort("wake_pause")
+            mqtt.sendStopListening()
         } else {
             Log.d(TAG, "对话占用麦克风，pause 不发送 stopListening")
         }
@@ -167,7 +167,7 @@ class ServerWakeDetector(
         eventJob = null
         stopAudio()
         try {
-            webSocket.sendStopListening()
+            mqtt.sendStopListening()
         } catch (_: Exception) {
         }
         releaseWakeLock()
@@ -181,7 +181,7 @@ class ServerWakeDetector(
 
     private fun registerTextListener() {
         unregisterTextListener()
-        removeTextListener = webSocket.addTextMessageListener { handleTextMessage(it) }
+        removeTextListener = mqtt.addTextMessageListener { handleTextMessage(it) }
     }
 
     private fun unregisterTextListener() {
@@ -191,7 +191,7 @@ class ServerWakeDetector(
 
     private fun ensureEventJob() {
         if (eventJob?.isActive == true) return
-        eventJob = scope.launch { listenWebSocketEvents() }
+        eventJob = scope.launch { listenMqttUdpEvents() }
     }
 
     private fun launchStreaming(reason: String) {
@@ -206,21 +206,21 @@ class ServerWakeDetector(
     private suspend fun waitConnectAndStream(generation: Int, reason: String) {
         if (generation != streamGeneration || !active) return
 
-        val alreadyConnected = webSocket.isConnected()
+        val alreadyConnected = mqtt.isConnected()
         val connected = if (alreadyConnected) {
             true
         } else {
             withTimeoutOrNull(CONNECT_TIMEOUT_MS) {
-                while (active && generation == streamGeneration && !webSocket.isConnected()) {
+                while (active && generation == streamGeneration && !mqtt.isConnected()) {
                     delay(200)
                 }
-                webSocket.isConnected()
+                mqtt.isConnected()
             } ?: false
         }
 
         if (!active || generation != streamGeneration) return
         if (!connected) {
-            Log.e(TAG, "WebSocket 未连接，服务端唤醒失败 gen=$generation，稍后重试")
+            Log.e(TAG, "MQTT 未连接，服务端唤醒失败 gen=$generation，稍后重试")
             if (active && generation == streamGeneration) {
                 delay(2_000)
                 if (active && generation == streamGeneration) {
@@ -232,32 +232,32 @@ class ServerWakeDetector(
 
         Log.i(
             TAG,
-            "WebSocket 就绪 session=${webSocket.getSessionId()} reason=$reason，发送 listen/start",
+            "MQTT 就绪 session=${mqtt.getSessionId()} reason=$reason，发送 listen/start",
         )
         VoiceFlowLog.step(
             "wakeSTT.listen",
-            "reason=$reason session=${webSocket.getSessionId()} gen=$generation",
+            "reason=$reason session=${mqtt.getSessionId()} gen=$generation",
         )
-        webSocket.sendStopListening()
+        mqtt.sendStopListening()
         if (reason == "resume" || reason == "start") {
             delay(80)
         }
-        webSocket.sendStartListening("auto")
+        mqtt.sendStartListening("auto")
         streamAudioLoop(generation)
     }
 
-    private suspend fun listenWebSocketEvents() {
-        webSocket.events.collect { event ->
+    private suspend fun listenMqttUdpEvents() {
+        mqtt.events.collect { event ->
             if (!active) return@collect
             when (event) {
-                is WebSocketEvent.Connected -> {
-                    Log.i(TAG, "WebSocket Connected，重启唤醒推流")
-                    VoiceFlowLog.snapshot("wakeSTT.wsConnected", "session=${webSocket.getSessionId()} gen=$streamGeneration")
+                is MqttUdpEvent.Connected -> {
+                    Log.i(TAG, "MQTT Connected，重启唤醒推流")
+                    VoiceFlowLog.snapshot("wakeSTT.mqttConnected", "session=${mqtt.getSessionId()} gen=$streamGeneration")
                     launchStreaming("reconnect")
                 }
-                is WebSocketEvent.Disconnected -> {
-                    Log.w(TAG, "WebSocket Disconnected，等待重连")
-                    VoiceFlowLog.warn("wakeSTT.wsDisconnected", "session=${webSocket.getSessionId()} gen=$streamGeneration streaming=$streaming")
+                is MqttUdpEvent.Disconnected -> {
+                    Log.w(TAG, "MQTT Disconnected，等待重连")
+                    VoiceFlowLog.warn("wakeSTT.mqttDisconnected", "session=${mqtt.getSessionId()} gen=$streamGeneration streaming=$streaming")
                 }
                 else -> Unit
             }
@@ -278,12 +278,12 @@ class ServerWakeDetector(
                     } else if (text.isNotBlank()) {
                         Log.i(TAG, "非唤醒词，abort 误触发对话")
                         VoiceFlowLog.step("wakeSTT.rejectStt", "text=$text")
-                        webSocket.sendAbort("not_wake_word")
+                        mqtt.sendAbort("not_wake_word")
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "解析 WebSocket 文本失败", e)
+            Log.w(TAG, "解析 MQTT 文本失败", e)
         }
     }
 
@@ -339,7 +339,7 @@ class ServerWakeDetector(
         streaming = true
         startingUp = false
         Log.i(TAG, "Opus 推流开始 gen=$generation")
-        VoiceFlowLog.snapshot("wakeSTT.streaming", "gen=$generation session=${webSocket.getSessionId()}")
+        VoiceFlowLog.snapshot("wakeSTT.streaming", "gen=$generation session=${mqtt.getSessionId()}")
 
         while (active && generation == streamGeneration && scope.isActive) {
             val read = audioRecord?.read(readBuffer, 0, readBuffer.size) ?: break
@@ -355,7 +355,7 @@ class ServerWakeDetector(
                 if (pcmFilled < FRAME_BYTES) continue
                 pcmFilled = 0
 
-                if (!webSocket.isConnected()) {
+                if (!mqtt.isConnected()) {
                     notReadySkips++
                     delay(200)
                     continue
@@ -366,7 +366,7 @@ class ServerWakeDetector(
                     encodeFailures++
                     continue
                 }
-                webSocket.sendBinaryMessage(opus)
+                mqtt.sendBinaryMessage(opus)
                 framesSent++
 
                 val now = System.currentTimeMillis()
@@ -374,17 +374,17 @@ class ServerWakeDetector(
                     Log.d(
                         TAG,
                         "心跳 gen=$generation frames=$framesSent encodeFail=$encodeFailures " +
-                            "wsSkip=$notReadySkips session=${webSocket.getSessionId()}",
+                            "mqttSkip=$notReadySkips session=${mqtt.getSessionId()}",
                     )
                     lastHeartbeat = now
                     if (now - lastListenRefresh >= LISTEN_REFRESH_INTERVAL_MS) {
                         Log.d(TAG, "续期 listen 会话 gen=$generation (stop+start)")
                         VoiceFlowLog.step(
                             "wakeSTT.listenRenew",
-                            "gen=$generation session=${webSocket.getSessionId()} frames=$framesSent",
+                            "gen=$generation session=${mqtt.getSessionId()} frames=$framesSent",
                         )
-                        webSocket.sendStopListening()
-                        webSocket.sendStartListening("auto")
+                        mqtt.sendStopListening()
+                        mqtt.sendStartListening("auto")
                         lastListenRefresh = System.currentTimeMillis()
                     }
                 }
@@ -457,7 +457,7 @@ class ServerWakeDetector(
 
     private fun isConfigReady(): Boolean {
         val cfg = ConfigManager(appContext).loadConfig()
-        val hasEndpoint = cfg.otaUrl.isNotBlank() || cfg.websocketUrl.isNotBlank()
+        val hasEndpoint = cfg.otaUrl.isNotBlank() || cfg.mqtt.isReady()
         return hasEndpoint && cfg.macAddress.isNotBlank() && cfg.token.isNotBlank()
     }
 

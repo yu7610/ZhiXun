@@ -4,19 +4,19 @@ import android.app.Application
 import android.util.Log
 import com.powerchina.zhixun.data.ConfigManager
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
-import com.powerchina.zhixun.network.WebSocketManager
 import java.io.File
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
- * MCP 拍照：压缩后上传隐患检测 HTTP 接口，结果通过 sendMcpToolResult 回传服务器。
+ * MCP 拍照：压缩后上传隐患检测 HTTP 接口（detectImageFile），
+ * 结果由调用方通过 sendMcpToolResult 回传小智。
+ *
+ * 注意：上传走独立 HTTP，不依赖 MQTT/UDP 握手。
  */
 object XiaozhiPhotoUploader {
 
     private const val TAG = PhotoKeyLog.TAG
-    private const val CONNECT_WAIT_MS = 15_000L
 
     suspend fun uploadPhotoForMcp(
         application: Application,
@@ -24,11 +24,6 @@ object XiaozhiPhotoUploader {
         @Suppress("UNUSED_PARAMETER") prompt: String = "请描述这张照片",
     ): Result<VisionExplainResult> = withContext(Dispatchers.IO) {
         runCatching {
-            val sessionManager = XiaozhiSessionManager.getInstance(application)
-            sessionManager.ensureConnected()
-            val webSocket = sessionManager.webSocketManager
-            waitForConnection(webSocket)
-
             var jpegBytes = compressJpegForUpload(photoFile, maxWidth = 480, quality = 70)
             if (jpegBytes.size > 180_000) {
                 jpegBytes = compressJpegForUpload(photoFile, maxWidth = 360, quality = 60)
@@ -40,7 +35,7 @@ object XiaozhiPhotoUploader {
             val macAddress = ConfigManager(application).loadConfig().macAddress
             Log.i(
                 TAG,
-                "MCP 上传照片 ${photoFile.name} size=${jpegBytes.size} bytes session=${webSocket.getSessionId()}",
+                "上传照片到 detectImageFile ${photoFile.name} size=${jpegBytes.size} bytes",
             )
 
             XiaozhiVisionClient.detectImageFile(
@@ -51,16 +46,6 @@ object XiaozhiPhotoUploader {
             ).getOrThrow()
         }.onFailure { e ->
             Log.e(TAG, "MCP 视觉上传失败", e)
-        }
-    }
-
-    private suspend fun waitForConnection(webSocketManager: WebSocketManager) {
-        val deadline = System.currentTimeMillis() + CONNECT_WAIT_MS
-        while (!webSocketManager.isConnected()) {
-            if (System.currentTimeMillis() >= deadline) {
-                throw IllegalStateException("小智未连接，请检查网络与配置")
-            }
-            delay(100)
         }
     }
 

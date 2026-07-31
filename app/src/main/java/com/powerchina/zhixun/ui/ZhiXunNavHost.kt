@@ -48,7 +48,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
         val conversationViewModel: ConversationViewModel = viewModel()
         val startDestination = remember {
             val cfg = configManager.loadConfig()
-            if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
+            if (cfg.otaUrl.isBlank() && !cfg.mqtt.isReady()) {
                 AppRoutes.Settings
             } else {
                 AppRoutes.Conversation
@@ -59,7 +59,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
             XiaozhiAppEvents.photoKeyRequests.collect {
                 Log.i(PhotoKeyLog.TAG, "收到物理拍照键请求")
                 val cfg = configManager.loadConfig()
-                if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
+                if (cfg.otaUrl.isBlank() && !cfg.mqtt.isReady()) {
                     Log.w(PhotoKeyLog.TAG, "未配置，无法发送拍照指令")
                     return@collect
                 }
@@ -86,7 +86,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                         "voiceKey=${req.startVoiceOnConnect}",
                 )
                 val cfg = configManager.loadConfig()
-                if (cfg.otaUrl.isBlank() && cfg.websocketUrl.isBlank()) {
+                if (cfg.otaUrl.isBlank() && !cfg.mqtt.isReady()) {
                     Log.w(TAG, "未配置，跳转设置页")
                     navController.navigate(AppRoutes.Settings)
                 } else {
@@ -159,7 +159,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                             conversationViewModel.updateConfig(newConfig)
                             sessionManager.clearUserStandbyDisconnect()
                             sessionManager.ensureConnected()
-                            if (newConfig.otaUrl.isNotBlank() || newConfig.websocketUrl.isNotBlank()) {
+                            if (newConfig.otaUrl.isNotBlank() || newConfig.mqtt.isReady()) {
                                 if (navController.previousBackStackEntry != null) {
                                     navController.popBackStack()
                                 } else {
@@ -171,7 +171,7 @@ fun ZhiXunNavHost(modifier: Modifier = Modifier) {
                         },
                         onBack = {
                             val cfg = configManager.loadConfig()
-                            if (cfg.otaUrl.isNotBlank() || cfg.websocketUrl.isNotBlank()) {
+                            if (cfg.otaUrl.isNotBlank() || cfg.mqtt.isReady()) {
                                 if (navController.previousBackStackEntry != null) {
                                     navController.popBackStack()
                                 } else {

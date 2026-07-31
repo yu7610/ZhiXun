@@ -40,7 +40,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.3"
+        versionName = "0.0.3.1"
 
         manifestPlaceholders["BAIDU_MAP_AK"] = baiduMapAk
 
@@ -129,6 +129,7 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.okhttp)
+    implementation(libs.paho.mqtt)
     implementation(libs.gson)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)

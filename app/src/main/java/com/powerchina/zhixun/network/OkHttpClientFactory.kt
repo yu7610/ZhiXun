@@ -40,7 +40,7 @@ object OkHttpClientFactory {
         connectTimeoutSec: Long = 15,
         readTimeoutSec: Long = 0,
         writeTimeoutSec: Long = 15,
-        /** WebSocket 长连接建议 0：小智服务端 idle 时可能不回 pong */
+        /** 长连接 ping 建议 0：小智服务端 idle 时可能不回 pong */
         pingIntervalSec: Long = 0,
     ): OkHttpClient {
         val anchors = loadEmbeddedTrustAnchors(context.applicationContext)
