@@ -22,6 +22,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission
@@ -101,6 +102,11 @@
             android:name=".location.LocationReportForegroundService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <service
+            android:name=".dashcam.DashcamRecordingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone" />
 
         <receiver
             android:name=".physicalkey.RecordKeyBlockReceiver"

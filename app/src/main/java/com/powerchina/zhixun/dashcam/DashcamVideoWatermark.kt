@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.media3.common.OverlaySettings
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.OverlayEffect
@@ -16,7 +17,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 执法仪录像本地落盘水印：显示录制日期与时间。
+ * 执法仪录像本地落盘水印：日期时间随画面播放进度逐秒变化。
  */
 object DashcamVideoWatermark {
 
@@ -25,30 +26,43 @@ object DashcamVideoWatermark {
     private const val WATERMARK_TEXT_SIZE_PX = 28f
 
     fun formatRecordingTimestamp(fileName: String): String {
-        val stem = DashcamRecordingStore.parseOemMp4Stem(fileName)
-        val recordedAt = runCatching {
-            SimpleDateFormat("yyyyMMddHHmmss", Locale.US).parse(stem)
-        }.getOrNull() ?: Date()
-        return SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(recordedAt)
+        val recordedAt = Date(parseRecordingStartEpochMs(fileName))
+        return displayFormat().format(recordedAt)
     }
 
+    /** 从文件名解析录制起点（毫秒 epoch）；失败则用当前时间 */
+    fun parseRecordingStartEpochMs(fileName: String): Long {
+        val stem = DashcamRecordingStore.parseOemMp4Stem(fileName)
+        return runCatching {
+            SimpleDateFormat("yyyyMMddHHmmss", Locale.US).parse(stem)?.time
+        }.getOrNull() ?: System.currentTimeMillis()
+    }
+
+    /**
+     * 动态水印：presentationTimeUs 对应「录制起点 + 播放进度」，每秒更新一次文字。
+     */
     @OptIn(UnstableApi::class)
-    fun createOverlayEffect(watermarkText: String): OverlayEffect? {
+    fun createOverlayEffect(fileName: String): OverlayEffect? {
         return try {
-            val bitmap = createWatermarkBitmap(watermarkText)
+            val startEpochMs = parseRecordingStartEpochMs(fileName)
             val settings = StaticOverlaySettings.Builder()
                 .setBackgroundFrameAnchor(-1f, -1f)
                 .setOverlayFrameAnchor(-1f, -1f)
                 .setAlphaScale(0.92f)
                 .build()
-            val overlay: TextureOverlay =
-                BitmapOverlay.createStaticBitmapOverlay(bitmap, settings)
+            val overlay: TextureOverlay = TimeTickingBitmapOverlay(
+                recordingStartEpochMs = startEpochMs,
+                overlaySettings = settings,
+            )
             OverlayEffect(listOf(overlay))
         } catch (e: Exception) {
-            Log.w(TAG, "创建视频水印失败: $watermarkText", e)
+            Log.w(TAG, "创建视频水印失败: $fileName", e)
             null
         }
     }
+
+    private fun displayFormat(): SimpleDateFormat =
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
 
     private fun createWatermarkBitmap(text: String): Bitmap {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -74,5 +88,34 @@ object DashcamVideoWatermark {
             paint,
         )
         return bitmap
+    }
+
+    @OptIn(UnstableApi::class)
+    private class TimeTickingBitmapOverlay(
+        private val recordingStartEpochMs: Long,
+        private val overlaySettings: OverlaySettings,
+    ) : BitmapOverlay() {
+
+        private val format = displayFormat()
+        private var cachedSecondIndex = Long.MIN_VALUE
+        private var cachedBitmap: Bitmap? = null
+
+        override fun getBitmap(presentationTimeUs: Long): Bitmap {
+            val secondIndex = presentationTimeUs.coerceAtLeast(0L) / 1_000_000L
+            cachedBitmap?.let { cached ->
+                if (cachedSecondIndex == secondIndex && !cached.isRecycled) {
+                    return cached
+                }
+            }
+            val wallClockMs = recordingStartEpochMs + secondIndex * 1000L
+            val text = format.format(Date(wallClockMs))
+            val bitmap = createWatermarkBitmap(text)
+            cachedSecondIndex = secondIndex
+            cachedBitmap = bitmap
+            return bitmap
+        }
+
+        override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =
+            overlaySettings
     }
 }

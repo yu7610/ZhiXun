@@ -1,6 +1,7 @@
 package com.powerchina.zhixun.dashcam
 
 import android.os.Bundle
+import android.util.Log
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -10,6 +11,10 @@ import com.powerchina.zhixun.xiaozhi.wake.XiaozhiWakeForegroundService
 
 /** 执法拍摄 / 行车记录仪独立页面 */
 class DashcamActivity : ComponentActivity() {
+
+    companion object {
+        private const val TAG = "DashcamActivity"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,7 +35,20 @@ class DashcamActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        DashcamForeground.setActive(false)
+        // 息屏也会走 onPause：录像中不标记后台，避免停录/解绑相机
+        if (isFinishing) {
+            Log.i(TAG, "onPause finishing → 释放执法仪前台标记")
+            DashcamForeground.setActive(false)
+        } else {
+            Log.i(TAG, "onPause（可能息屏）→ 保持执法仪会话，录像继续")
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isFinishing) {
+            DashcamForeground.setActive(false)
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -47,6 +65,8 @@ class DashcamActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        Log.i(TAG, "onDestroy → 释放执法仪")
+        DashcamForeground.setActive(false)
         ScreenOnHelper.detach(this)
         super.onDestroy()
     }

@@ -78,6 +78,7 @@
     <string name="open_dashcam">执法拍摄</string>
     <string name="dashcam_back">返回小智</string>
     <string name="dashcam_recording">录制中</string>
+    <string name="dashcam_recording_fg_text">正在录像，息屏仍会继续录制</string>
     <string name="dashcam_tap_to_record">录像已暂停，点击继续</string>
     <string name="dashcam_saved_clips">本地回放</string>
     <string name="dashcam_permission_hint">需要相机和麦克风权限才能录像/录音</string>

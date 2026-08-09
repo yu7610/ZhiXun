@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import android.view.View
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.Quality
@@ -25,8 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -48,8 +46,9 @@ fun DashcamCameraPreview(
     onSessionReady: (DashcamCameraSession?) -> Unit,
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
+    // 独立生命周期：Activity 息屏 ON_STOP 不会解绑相机，录像可继续
+    val cameraLifecycleOwner = remember { DashcamCameraLifecycleOwner() }
     val previewView = remember {
         PreviewView(context).apply {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -58,43 +57,27 @@ fun DashcamCameraPreview(
     }
     var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
     var bindGeneration by remember { mutableIntStateOf(0) }
-    var wasPaused by remember { mutableStateOf(false) }
 
     AndroidView(
         factory = { previewView },
         modifier = modifier,
     )
 
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE -> {
-                    wasPaused = true
-                    runCatching { cameraProviderRef?.unbindAll() }
-                    onSessionReady(null)
-                }
-                Lifecycle.Event.ON_RESUME -> {
-                    if (wasPaused) {
-                        wasPaused = false
-                        bindGeneration++
-                    }
-                }
-                else -> Unit
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
+    DisposableEffect(Unit) {
+        cameraLifecycleOwner.start()
         onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
             onSessionReady(null)
             runCatching { cameraProviderRef?.unbindAll() }
             cameraProviderRef = null
+            cameraLifecycleOwner.destroy()
         }
     }
 
     LaunchedEffect(lensFacing, bindGeneration, rebindToken) {
         onSessionReady(null)
-        if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            Log.w(TAG, "生命周期未 STARTED，跳过绑定 gen=$bindGeneration")
+        cameraLifecycleOwner.start()
+        if (!cameraLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            Log.w(TAG, "相机生命周期未 STARTED，跳过绑定 gen=$bindGeneration")
             return@LaunchedEffect
         }
         McpCameraHolder.pauseForDashcam()
@@ -119,8 +102,8 @@ fun DashcamCameraPreview(
         var bound = false
         for (attempt in 1..MAX_BIND_ATTEMPTS) {
             if (!isActive) return@LaunchedEffect
-            if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                Log.w(TAG, "绑定前生命周期已暂停 attempt=$attempt")
+            if (!cameraLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                Log.w(TAG, "绑定前相机生命周期已销毁 attempt=$attempt")
                 break
             }
             try {
@@ -131,7 +114,7 @@ fun DashcamCameraPreview(
                             bindCamera(
                                 context = context,
                                 cameraProvider = cameraProvider,
-                                lifecycleOwner = lifecycleOwner,
+                                lifecycleOwner = cameraLifecycleOwner,
                                 previewView = previewView,
                                 lensFacing = lensFacing,
                                 mainExecutor = mainExecutor,
@@ -191,7 +174,7 @@ private suspend fun PreviewView.awaitAttachedAndLaidOut() {
 private fun bindCamera(
     context: Context,
     cameraProvider: ProcessCameraProvider,
-    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
+    lifecycleOwner: LifecycleOwner,
     previewView: PreviewView,
     lensFacing: Int,
     mainExecutor: Executor,

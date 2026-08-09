@@ -1,6 +1,7 @@
 package com.powerchina.zhixun.dashcam
 
 import android.app.Application
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -105,6 +106,8 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     private var timerJob: Job? = null
     private var frameUploadJob: Job? = null
     private var compressJob: Job? = null
+    /** 用 elapsedRealtime 累计，避免亮屏重绑/协程重启把秒数清零 */
+    private var recordingStartedAtElapsedMs = 0L
     private val frameCaptureInProgress = AtomicBoolean(false)
     private val photoCaptureInProgress = AtomicBoolean(false)
     private val recordingStartInProgress = AtomicBoolean(false)
@@ -137,10 +140,12 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun releaseCameraForBackground() {
+        // 仅离开执法仪页（Activity destroy）时调用；息屏不触发，保证继续录像
         if (_isRecording.value || recordingStartInProgress.get()) {
-            Log.i(TAG, "执法仪进入后台，停止录像以释放相机")
+            Log.i(TAG, "离开执法仪页，停止录像以释放相机")
             stopRecording(markUserStopped = false)
         }
+        DashcamRecordingForegroundService.ensureStopped(app)
         bindCameraSession(null)
     }
 
@@ -172,6 +177,9 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         cameraReadyWaitJob?.cancel()
         cameraReadyWaitJob = null
         _isRecording.value = false
+        recordingStartedAtElapsedMs = 0L
+        _elapsedSeconds.value = 0
+        DashcamRecordingForegroundService.ensureStopped(app)
         stopTimer()
         stopFrameUploadLoop()
     }
@@ -209,8 +217,20 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onDashcamForeground() {
+        // 息屏再亮：录像若仍在进行，禁止重绑相机/重开录，否则计时会从 0 重来
+        if (_isRecording.value && recordingController?.isRecording == true) {
+            Log.i(TAG, "亮屏恢复：录像仍在进行，保持计时不重绑")
+            ensureTimerRunning()
+            return
+        }
+        if (_isRecording.value && recordingController?.isRecording != true) {
+            Log.w(TAG, "亮屏恢复：录像状态不一致，清理后按需重开")
+            cancelPendingRecordingState(markUserStopped = false)
+        }
         userStoppedRecording = false
-        _requestCameraRebind.tryEmit(Unit)
+        if (cameraSession == null) {
+            _requestCameraRebind.tryEmit(Unit)
+        }
         tryAutoStartRecording()
     }
 
@@ -573,7 +593,9 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 cancelRecordingStartTimeout()
                 setRecordingStarting(false)
                 _isRecording.value = true
+                recordingStartedAtElapsedMs = SystemClock.elapsedRealtime()
                 _elapsedSeconds.value = 0
+                DashcamRecordingForegroundService.ensureStarted(app)
                 startTimer()
                 startFrameUploadLoop()
             },
@@ -585,6 +607,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 cancelRecordingStartTimeout()
                 setRecordingStarting(false)
                 _isRecording.value = false
+                DashcamRecordingForegroundService.ensureStopped(app)
                 stopTimer()
                 stopFrameUploadLoop()
                 showMessage("录像失败: $err")
@@ -620,6 +643,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 if (markUserStopped) userStoppedRecording = true
                 cancelPendingRecordingState(markUserStopped = markUserStopped)
             }
+            DashcamRecordingForegroundService.ensureStopped(app)
             if (pendingPhotoAfterStop) {
                 pendingPhotoAfterStop = false
                 capturePhotoInternal()
@@ -631,6 +655,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 if (markUserStopped) userStoppedRecording = true
                 cancelPendingRecordingState(markUserStopped = markUserStopped)
             }
+            DashcamRecordingForegroundService.ensureStopped(app)
             if (pendingPhotoAfterStop) {
                 pendingPhotoAfterStop = false
                 capturePhotoInternal()
@@ -641,6 +666,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         controller.stopRecording { result ->
             _isRecording.value = false
             setRecordingStarting(false)
+            DashcamRecordingForegroundService.ensureStopped(app)
             stopTimer()
             stopFrameUploadLoop()
             result.onSuccess { output ->
@@ -670,10 +696,23 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
             while (isActive && _isRecording.value) {
+                refreshElapsedFromClock()
                 delay(1000)
-                _elapsedSeconds.value += 1
             }
         }
+    }
+
+    private fun ensureTimerRunning() {
+        refreshElapsedFromClock()
+        if (timerJob?.isActive == true) return
+        startTimer()
+    }
+
+    private fun refreshElapsedFromClock() {
+        val startedAt = recordingStartedAtElapsedMs
+        if (startedAt <= 0L) return
+        _elapsedSeconds.value =
+            ((SystemClock.elapsedRealtime() - startedAt) / 1000L).toInt().coerceAtLeast(0)
     }
 
     private fun stopTimer() {
@@ -814,6 +853,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         if (_isRecording.value) {
             recordingController?.stopRecording { _ -> refreshClips() }
         }
+        DashcamRecordingForegroundService.ensureStopped(app)
         stopTimer()
         super.onCleared()
     }

@@ -113,12 +113,12 @@ object DashcamVideoCompressor {
         suspendCancellableCoroutine { cont ->
             val app = context.applicationContext
             val sourceUri = source.toUri()
-            val watermarkText = DashcamVideoWatermark.formatRecordingTimestamp(source.name)
+            val watermarkStart = DashcamVideoWatermark.formatRecordingTimestamp(source.name)
             val videoEffects = buildList {
                 add(Presentation.createForHeight(TARGET_HEIGHT_PX))
-                DashcamVideoWatermark.createOverlayEffect(watermarkText)?.let { add(it) }
+                DashcamVideoWatermark.createOverlayEffect(source.name)?.let { add(it) }
             }
-            Log.i(TAG, "转码加水印 ${source.name} watermark=$watermarkText")
+            Log.i(TAG, "转码加水印 ${source.name} start=$watermarkStart（随播放进度逐秒变化）")
             val editedMediaItem = EditedMediaItem.Builder(MediaItem.fromUri(sourceUri))
                 .setEffects(
                     Effects(

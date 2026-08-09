@@ -1,7 +1,10 @@
 package com.powerchina.zhixun.dashcam
 
 /**
- * 执法仪页是否在前台；后台时不应占用相机供 MCP 拍照使用。
+ * 执法仪页是否仍持有会话。
+ *
+ * 息屏不会清掉 active（保证录像继续）；仅离开页面 / Activity destroy 时置 false，
+ * 并触发 [onBackground] 停录、释放相机。
  */
 object DashcamForeground {
 
