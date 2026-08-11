@@ -481,10 +481,10 @@ class EnhancedAudioManager(private val context: Context) {
     fun isRecording(): Boolean = isRecording
 
     /**
-     * 获取播放状态
+     * 是否正在出声。勿把 isPlayingState（管线已就绪）当成在播，
+     * 否则唤醒问候会在无 Opus 时误接受 tts stop。
      */
-    fun isPlaying(): Boolean = streamPlayer?.isCurrentlyPlaying() == true || isPlayingState
-    
+    fun isPlaying(): Boolean = streamPlayer?.isCurrentlyPlaying() == true
     /**
      * 测试音频播放（生成一个简单的测试音调）
      */

@@ -104,8 +104,17 @@ object DashcamRecordingStore {
         return DashcamVideoOutputRequest(displayName = name, contentValues = values)
     }
 
+    /** RootEncoder 本地录像目标文件（app 外部 movies/dashcam/originals） */
+    fun createEncoderRecordFile(context: Context, displayName: String): File {
+        val safeName = displayName.ifBlank { createOemVideoFileName() }
+        val file = File(originalsDir(context), safeName)
+        Log.i(TAG, "RootEncoder 录像文件 ${file.absolutePath}")
+        return file
+    }
+
     fun publishVideoOutput(context: Context, output: DashcamVideoOutput): String {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        // RootEncoder 写本地 file://，无需 IS_PENDING
+        if (output.uri.scheme != "file" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.IS_PENDING, 0)
             }
@@ -115,7 +124,7 @@ object DashcamRecordingStore {
         val ready = waitForVideoReady(context, output)
         ready.onFailure { err -> Log.w(TAG, "录像落盘等待失败 ${output.displayName}", err) }
         resolveVideoFile(context, output)?.let { file ->
-            indexVideoInGallery(context, file, output.uri)
+            indexVideoInGallery(context, file, output.uri.takeIf { it.scheme != "file" })
         }
         return buildVideoPublishReport(context, output, readyBytes = ready.getOrNull())
     }
@@ -340,8 +349,16 @@ object DashcamRecordingStore {
             val tempName = buildOemCompressedFileName(parseOemMp4Stem(originalDisplayName))
             findVideoUriByDisplayName(context, tempName)?.let { deleteVideoIndex(context, it) }
         }
-        deleteStaleDuplicateVideos(context, oemName, originalRecordingUri)
-        indexVideoInGallery(context, finalFile, originalRecordingUri)
+        deleteStaleDuplicateVideos(
+            context,
+            oemName,
+            originalRecordingUri.takeIf { it.scheme == "content" },
+        )
+        indexVideoInGallery(
+            context,
+            finalFile,
+            originalRecordingUri.takeIf { it.scheme == "content" },
+        )
         Log.i(TAG, "压缩成功，已替换原片 ${finalFile.name} size=$finalBytes")
         return finalFile
     }
@@ -668,7 +685,7 @@ object DashcamRecordingStore {
     private fun deleteStaleDuplicateVideos(
         context: Context,
         displayName: String,
-        keepUri: Uri,
+        keepUri: Uri?,
     ) {
         val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val baseName = stripMp4Extension(displayName)
@@ -684,7 +701,7 @@ object DashcamRecordingStore {
                 val id = cursor.getLong(idCol)
                 val name = cursor.getString(nameCol) ?: continue
                 val uri = ContentUris.withAppendedId(collection, id)
-                if (uri == keepUri) continue
+                if (keepUri != null && uri == keepUri) continue
                 context.contentResolver.delete(uri, null, null)
                 Log.i(TAG, "已删除重复 MediaStore 视频 name=$name uri=$uri")
             }
@@ -724,16 +741,18 @@ object DashcamRecordingStore {
             return null
         }
         val app = context.applicationContext
-        val uri = knownUri
+        // RootEncoder 录像使用 file://，不能交给 ContentResolver.update
+        val mediaStoreUri = knownUri?.takeIf { it.scheme == "content" }
+        val uri = mediaStoreUri
             ?: findVideoUriByFile(app, file)
             ?: insertVideoIndexEntry(app, file, relativePath)
 
-        if (uri != null) {
+        if (uri != null && uri.scheme == "content") {
             updateVideoIndexMetadata(app, uri, file)
         }
 
         scanVideoFiles(app, file)
-        notifyVideoCollectionChanged(app, uri, file)
+        notifyVideoCollectionChanged(app, uri?.takeIf { it.scheme == "content" }, file)
 
         Log.i(
             TAG,
@@ -782,6 +801,10 @@ object DashcamRecordingStore {
     }
 
     private fun updateVideoIndexMetadata(context: Context, uri: Uri, file: File) {
+        if (uri.scheme != "content") {
+            Log.d(TAG, "跳过非 MediaStore URI 的 metadata 更新: $uri")
+            return
+        }
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.SIZE, file.length())
             put(MediaStore.Video.Media.DATE_MODIFIED, file.lastModified() / 1000L)
@@ -790,7 +813,11 @@ object DashcamRecordingStore {
                 put(MediaStore.Video.Media.IS_PENDING, 0)
             }
         }
-        context.contentResolver.update(uri, values, null, null)
+        runCatching {
+            context.contentResolver.update(uri, values, null, null)
+        }.onFailure { err ->
+            Log.w(TAG, "更新媒体库元数据失败 uri=$uri", err)
+        }
     }
 
     private fun notifyVideoCollectionChanged(context: Context, uri: Uri?, file: File) {
@@ -849,6 +876,12 @@ object DashcamRecordingStore {
     }
 
     fun deleteVideoOutput(context: Context, output: DashcamVideoOutput) {
+        if (output.uri.scheme == "file") {
+            output.uri.path?.let { path ->
+                runCatching { File(path).delete() }
+            }
+            return
+        }
         runCatching { context.contentResolver.delete(output.uri, null, null) }
     }
 

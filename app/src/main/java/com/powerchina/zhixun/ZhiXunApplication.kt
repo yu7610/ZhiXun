@@ -7,6 +7,7 @@ import androidx.camera.core.CameraXConfig
 import com.powerchina.zhixun.dashcam.VideoKeyHandler
 import com.powerchina.zhixun.dashcam.VideoKeyReceiver
 import com.powerchina.zhixun.dashcam.VideoKeyRegistrar
+import com.powerchina.zhixun.dashcam.VideoUploadCoordinator
 import com.powerchina.zhixun.physicalkey.PhysicalKeyLifecycle
 import com.powerchina.zhixun.location.LocationBootstrap
 import com.powerchina.zhixun.xiaozhi.wake.OfflineWakeDetector
@@ -24,6 +25,7 @@ class ZhiXunApplication : Application(), CameraXConfig.Provider {
         // 仅初始化百度 SDK；连续定位/上报在进入定位页时启动
         LocationBootstrap.initialize(this)
         PhysicalKeyLifecycle.register(this)
+        VideoUploadCoordinator.init(this)
         Log.i(
             VideoKeyReceiver.TAG,
             "物理键拦截已启用 (KeyEvent + 录音键广播 + 录像键广播)",

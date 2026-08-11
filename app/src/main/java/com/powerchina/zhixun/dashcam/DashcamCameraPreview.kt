@@ -1,16 +1,9 @@
 package com.powerchina.zhixun.dashcam
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import android.view.View
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
-import androidx.camera.video.Recorder
-import androidx.camera.video.VideoCapture
-import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -23,21 +16,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleOwner
+import com.pedro.library.view.OpenGlView
 import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
 
 private const val TAG = "DashcamCamera"
 private const val BIND_SETTLE_MS = 350L
 private const val MAX_BIND_ATTEMPTS = 6
 
+/**
+ * 执法仪预览：RootEncoder OpenGlView，一路相机同时支持录像与 RTSP 推流。
+ */
 @Composable
 fun DashcamCameraPreview(
     lensFacing: Int,
@@ -47,79 +40,57 @@ fun DashcamCameraPreview(
 ) {
     val context = LocalContext.current
     val mainExecutor = remember { ContextCompat.getMainExecutor(context) }
-    // 独立生命周期：Activity 息屏 ON_STOP 不会解绑相机，录像可继续
-    val cameraLifecycleOwner = remember { DashcamCameraLifecycleOwner() }
-    val previewView = remember {
-        PreviewView(context).apply {
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+    val openGlView = remember {
+        OpenGlView(context).apply {
+            keepScreenOn = true
         }
     }
-    var cameraProviderRef by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var engineRef by remember { mutableStateOf<DashcamRtspEngine?>(null) }
     var bindGeneration by remember { mutableIntStateOf(0) }
 
     AndroidView(
-        factory = { previewView },
+        factory = { openGlView },
         modifier = modifier,
     )
 
     DisposableEffect(Unit) {
-        cameraLifecycleOwner.start()
         onDispose {
             onSessionReady(null)
-            runCatching { cameraProviderRef?.unbindAll() }
-            cameraProviderRef = null
-            cameraLifecycleOwner.destroy()
+            engineRef?.release()
+            engineRef = null
         }
     }
 
     LaunchedEffect(lensFacing, bindGeneration, rebindToken) {
         onSessionReady(null)
-        cameraLifecycleOwner.start()
-        if (!cameraLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-            Log.w(TAG, "相机生命周期未 STARTED，跳过绑定 gen=$bindGeneration")
-            return@LaunchedEffect
-        }
         McpCameraHolder.pauseForDashcam()
         delay(BIND_SETTLE_MS)
         if (!isActive) return@LaunchedEffect
 
-        previewView.awaitAttachedAndLaidOut()
+        openGlView.awaitAttachedAndLaidOut()
         if (!isActive) return@LaunchedEffect
-
-        val cameraProvider = try {
-            withContext(Dispatchers.IO) {
-                ProcessCameraProvider.getInstance(context).get()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "获取 CameraProvider 失败", e)
-            onSessionReady(null)
-            return@LaunchedEffect
-        }
-        if (!isActive) return@LaunchedEffect
-        cameraProviderRef = cameraProvider
 
         var bound = false
         for (attempt in 1..MAX_BIND_ATTEMPTS) {
             if (!isActive) return@LaunchedEffect
-            if (!cameraLifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                Log.w(TAG, "绑定前相机生命周期已销毁 attempt=$attempt")
-                break
-            }
             try {
                 suspendCancellableCoroutine { cont ->
-                    previewView.post {
+                    openGlView.post {
                         if (!cont.isActive) return@post
                         try {
-                            bindCamera(
+                            val engine = engineRef ?: DashcamRtspEngine(context, openGlView).also {
+                                engineRef = it
+                            }
+                            if (!engine.prepareAndStartPreview(lensFacing)) {
+                                throw IllegalStateException("prepare/preview 失败")
+                            }
+                            val session = DashcamCameraSession(
                                 context = context,
-                                cameraProvider = cameraProvider,
-                                lifecycleOwner = cameraLifecycleOwner,
-                                previewView = previewView,
-                                lensFacing = lensFacing,
+                                engine = engine,
+                                recordingController = DashcamRecordingController(context, engine, mainExecutor),
                                 mainExecutor = mainExecutor,
-                                onSessionReady = onSessionReady,
                             )
+                            onSessionReady(session)
                             cont.resume(Unit)
                         } catch (e: Exception) {
                             cont.resumeWithException(e)
@@ -127,27 +98,30 @@ fun DashcamCameraPreview(
                     }
                 }
                 bound = true
-                Log.i(TAG, "相机绑定成功 gen=$bindGeneration attempt=$attempt")
+                Log.i(TAG, "RootEncoder 预览就绪 gen=$bindGeneration attempt=$attempt facing=$lensFacing")
                 break
             } catch (e: Exception) {
-                Log.w(TAG, "绑定相机失败 gen=$bindGeneration attempt=$attempt/$MAX_BIND_ATTEMPTS", e)
+                Log.w(TAG, "预览启动失败 attempt=$attempt/$MAX_BIND_ATTEMPTS", e)
                 onSessionReady(null)
                 if (attempt < MAX_BIND_ATTEMPTS) {
                     delay(350L * attempt)
                     McpCameraHolder.pauseForDashcam()
                     delay(BIND_SETTLE_MS)
-                    previewView.awaitAttachedAndLaidOut()
+                    // 彻底重建 engine
+                    engineRef?.release()
+                    engineRef = null
+                    openGlView.awaitAttachedAndLaidOut()
                 }
             }
         }
         if (!bound) {
-            Log.e(TAG, "绑定相机最终失败 gen=$bindGeneration")
+            Log.e(TAG, "预览最终失败 gen=$bindGeneration")
             onSessionReady(null)
         }
     }
 }
 
-private suspend fun PreviewView.awaitAttachedAndLaidOut() {
+private suspend fun View.awaitAttachedAndLaidOut() {
     suspendCancellableCoroutine { cont ->
         fun tryResume() {
             if (cont.isActive && isAttachedToWindow) {
@@ -169,51 +143,4 @@ private suspend fun PreviewView.awaitAttachedAndLaidOut() {
         addOnAttachStateChangeListener(listener)
         cont.invokeOnCancellation { removeOnAttachStateChangeListener(listener) }
     }
-}
-
-private fun bindCamera(
-    context: Context,
-    cameraProvider: ProcessCameraProvider,
-    lifecycleOwner: LifecycleOwner,
-    previewView: PreviewView,
-    lensFacing: Int,
-    mainExecutor: Executor,
-    onSessionReady: (DashcamCameraSession?) -> Unit,
-) {
-    if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-        throw IllegalStateException("生命周期未 STARTED")
-    }
-    val preview = Preview.Builder().build().also {
-        it.surfaceProvider = previewView.surfaceProvider
-    }
-    val imageCapture = SilentImageCapture.build()
-    val recorder = Recorder.Builder()
-        .setQualitySelector(QualitySelector.from(Quality.HD))
-        .build()
-    val videoCapture = VideoCapture.withOutput(recorder)
-    val cameraSelector = CameraSelector.Builder()
-        .requireLensFacing(lensFacing)
-        .build()
-
-    cameraProvider.unbindAll()
-    cameraProvider.bindToLifecycle(
-        lifecycleOwner,
-        cameraSelector,
-        preview,
-        imageCapture,
-        videoCapture,
-    )
-    val recordingController = DashcamRecordingController(
-        context = context,
-        videoCapture = videoCapture,
-        mainExecutor = mainExecutor,
-    )
-    onSessionReady(
-        DashcamCameraSession(
-            context = context,
-            imageCapture = imageCapture,
-            recordingController = recordingController,
-            mainExecutor = mainExecutor,
-        ),
-    )
 }

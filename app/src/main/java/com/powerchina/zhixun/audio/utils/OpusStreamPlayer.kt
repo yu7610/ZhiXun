@@ -25,13 +25,16 @@ class OpusStreamPlayer(
 ) {
     companion object {
         private const val TAG = "OpusStreamPlayer"
+        private const val ACTIVE_PLAY_IDLE_MS = 700L
     }
 
     private var audioTrack: AudioTrack
     private val playerScope = CoroutineScope(Dispatchers.IO + Job())
     private var isPlaying = false
     private var playbackJob: Job? = null
-    
+    @Volatile
+    private var lastPcmWriteAtMs = 0L
+
     // 音频焦点管理
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -166,6 +169,7 @@ class OpusStreamPlayer(
         }
         
         isPlaying = true
+        lastPcmWriteAtMs = 0L
         if (audioTrack.state == AudioTrack.STATE_INITIALIZED) {
             audioTrack.play()
             Log.i(TAG, "AudioTrack开始播放，状态: ${audioTrack.playState}")
@@ -184,6 +188,7 @@ class OpusStreamPlayer(
                         if (bytesWritten < 0) {
                             Log.e(TAG, "AudioTrack写入失败: $bytesWritten")
                         } else {
+                            lastPcmWriteAtMs = System.currentTimeMillis()
                             Log.d(TAG, "AudioTrack写入成功: $bytesWritten bytes")
                         }
                     }
@@ -203,6 +208,7 @@ class OpusStreamPlayer(
     fun stop() {
         if (isPlaying) {
             isPlaying = false
+            lastPcmWriteAtMs = 0L
             playbackJob?.cancel()
             playbackJob = null
             
@@ -231,8 +237,13 @@ class OpusStreamPlayer(
         }
     }
 
+    /** 近期写入了 PCM 才算真正出声（管线 play() 空转不算） */
     fun isCurrentlyPlaying(): Boolean {
-        return isPlaying && audioTrack.playState == AudioTrack.PLAYSTATE_PLAYING
+        if (!isPlaying) return false
+        if (audioTrack.playState != AudioTrack.PLAYSTATE_PLAYING) return false
+        val last = lastPcmWriteAtMs
+        if (last <= 0L) return false
+        return System.currentTimeMillis() - last < ACTIVE_PLAY_IDLE_MS
     }
 
     protected fun finalize() {

@@ -1,110 +1,97 @@
 package com.powerchina.zhixun.dashcam
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
+import android.net.Uri
 import android.util.Log
-import androidx.core.content.ContextCompat
-import androidx.camera.video.MediaStoreOutputOptions
-import androidx.camera.video.Recorder
-import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
-import androidx.camera.video.VideoRecordEvent
+import java.io.File
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicReference
 
+/**
+ * 基于 [DashcamRtspEngine] 的本地录像控制（与 RTSP 推流共用一路相机编码）。
+ */
 class DashcamRecordingController(
     private val context: Context,
-    private val videoCapture: VideoCapture<Recorder>,
+    private val engine: DashcamRtspEngine,
     private val mainExecutor: Executor,
 ) {
     private val tag = "DashcamRecCtrl"
 
-    private var activeRecording: Recording? = null
+    private val activeFile = AtomicReference<File?>(null)
     private var currentRequest: DashcamVideoOutputRequest? = null
     private var onFinalize: ((Result<DashcamVideoOutput>) -> Unit)? = null
 
     val isRecording: Boolean
-        get() = activeRecording != null
+        get() = engine.isRecording
 
     fun startRecording(
         request: DashcamVideoOutputRequest,
         onStarted: () -> Unit,
         onError: (String) -> Unit,
     ): Boolean {
-        if (activeRecording != null) {
+        if (engine.isRecording) {
             Log.w(tag, "startRecording 跳过：已在录制 name=${request.displayName}")
             return false
         }
         currentRequest = request
         onFinalize = null
-        val outputOptions = MediaStoreOutputOptions.Builder(
-            context.contentResolver,
-            DashcamRecordingStore.videoCollectionUri(),
-        )
-            .setContentValues(request.contentValues)
-            .build()
-        val pendingRecording = videoCapture.output.prepareRecording(context, outputOptions)
-        val withAudio = if (
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED
-        ) {
-            pendingRecording.withAudioEnabled()
-        } else {
-            Log.w(tag, "无麦克风权限，录像不含音频")
-            pendingRecording
-        }
-        activeRecording = withAudio.start(mainExecutor) { event ->
-                when (event) {
-                    is VideoRecordEvent.Start -> {
-                        Log.i(tag, "录像已开始 name=${request.displayName}")
-                        onStarted()
-                    }
-                    is VideoRecordEvent.Finalize -> {
-                        val videoRequest = currentRequest
-                        activeRecording = null
-                        currentRequest = null
-                        val callback = onFinalize
-                        onFinalize = null
-                        if (event.hasError()) {
-                            val failedUri = event.outputResults.outputUri
-                            Log.e(
-                                tag,
-                                "录像 Finalize 失败 name=${videoRequest?.displayName} " +
-                                    "uri=$failedUri error=${event.cause?.message}",
-                                event.cause,
-                            )
-                            if (failedUri != null && videoRequest != null) {
-                                DashcamRecordingStore.deleteVideoOutput(
-                                    context,
-                                    DashcamVideoOutput(failedUri, videoRequest.displayName),
-                                )
-                            }
-                            callback?.invoke(
-                                Result.failure(Exception(event.cause?.message ?: "录像失败")),
-                            )
-                            onError(event.cause?.message ?: "录像失败")
-                        } else if (videoRequest != null) {
-                            val outputUri = event.outputResults.outputUri
-                            val output = DashcamVideoOutput(outputUri, videoRequest.displayName)
-                            Log.i(
-                                tag,
-                                "录像 Finalize 成功 uri=$outputUri " +
-                                    "durationNs=${event.recordingStats.recordedDurationNanos}",
-                            )
-                            callback?.invoke(Result.success(output))
-                        }
-                    }
+        val recordFile = DashcamRecordingStore.createEncoderRecordFile(context, request.displayName)
+        activeFile.set(recordFile)
+        Log.i(tag, "开始 RootEncoder 录像 path=${recordFile.absolutePath}")
+
+        return engine.startRecording(
+            recordFile = recordFile,
+            onStarted = {
+                mainExecutor.execute { onStarted() }
+            },
+            onError = { msg ->
+                mainExecutor.execute {
+                    activeFile.set(null)
+                    currentRequest = null
+                    onError(msg)
                 }
-            }
-        return true
+            },
+            onStopped = { result ->
+                mainExecutor.execute {
+                    val videoRequest = currentRequest
+                    currentRequest = null
+                    val callback = onFinalize
+                    onFinalize = null
+                    activeFile.set(null)
+                    if (callback == null) {
+                        // stop 未登记回调时（异常路径），仅打日志
+                        result.onFailure { Log.e(tag, "录像结束但无回调", it) }
+                        return@execute
+                    }
+                    if (videoRequest == null) {
+                        callback(Result.failure(IllegalStateException("录像请求丢失")))
+                        return@execute
+                    }
+                    result.fold(
+                        onSuccess = { file ->
+                            val output = DashcamVideoOutput(
+                                uri = Uri.fromFile(file),
+                                displayName = videoRequest.displayName,
+                            )
+                            Log.i(tag, "录像成功 uri=${output.uri} size=${file.length()}B")
+                            callback(Result.success(output))
+                        },
+                        onFailure = { err ->
+                            Log.e(tag, "录像失败 name=${videoRequest.displayName}", err)
+                            callback(Result.failure(err))
+                        },
+                    )
+                }
+            },
+        )
     }
 
     fun stopRecording(onStopped: (Result<DashcamVideoOutput>) -> Unit) {
-        val recording = activeRecording ?: run {
+        if (!engine.isRecording) {
             onStopped(Result.failure(IllegalStateException("未在录制")))
             return
         }
         onFinalize = onStopped
-        recording.stop()
+        engine.stopRecording()
     }
 }

@@ -28,22 +28,25 @@ class OpusEncoder(
     }
 
     suspend fun encode(pcmData: ByteArray): ByteArray? = withContext(Dispatchers.IO) {
-        val frameBytes = frameSize * channels * 2 // 16-bit PCM
+        encodeSync(pcmData)
+    }
+
+    /** 同步编码（唤醒问候 UDP NAT 保活） */
+    fun encodeSync(pcmData: ByteArray): ByteArray? {
+        val frameBytes = frameSize * channels * 2
         if (pcmData.size != frameBytes) {
             Log.e(TAG, "Input buffer size must be $frameBytes bytes (got ${pcmData.size})")
-            return@withContext null
+            return null
         }
-
-        val outputBuffer = ByteArray(frameBytes) // 分配足够大的缓冲区
+        val outputBuffer = ByteArray(frameBytes)
         val encodedBytes = nativeEncodeBytes(
             nativeEncoderHandle,
             pcmData,
             pcmData.size,
             outputBuffer,
-            outputBuffer.size
+            outputBuffer.size,
         )
-
-        if (encodedBytes > 0) {
+        return if (encodedBytes > 0) {
             outputBuffer.copyOf(encodedBytes)
         } else {
             Log.e(TAG, "Failed to encode frame")

@@ -21,6 +21,7 @@ baiduMap = "7.6.4"
 baiduLocation = "9.6.4"
 media3 = "1.6.0"
 bugly = "4.1.9"
+rootencoder = "2.6.5"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -61,6 +62,7 @@ baidu-location-sdk = { group = "com.baidu.lbsyun", name = "BaiduMapSDK_Location"
 androidx-media3-transformer = { group = "androidx.media3", name = "media3-transformer", version.ref = "media3" }
 androidx-media3-effect = { group = "androidx.media3", name = "media3-effect", version.ref = "media3" }
 bugly-crashreport = { group = "com.tencent.bugly", name = "crashreport", version.ref = "bugly" }
+rootencoder = { group = "com.github.pedroSG94.RootEncoder", name = "library", version.ref = "rootencoder" }
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

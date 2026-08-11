@@ -29,7 +29,7 @@ import kotlinx.coroutines.withContext
 object DashcamVideoCompressor {
 
     const val TAG = "DashcamCompress"
-    /** 压缩目标高度（原片多为 720p HD） */
+    /** 压缩目标高度（原片 1080p） */
     private const val TARGET_HEIGHT_PX = 480
 
     private val mainHandler = Handler(Looper.getMainLooper())

@@ -147,6 +147,7 @@ dependencies {
     implementation(libs.baidu.location.sdk)
     implementation("com.github.paramsen:noise:2.0.0")
     implementation(libs.bugly.crashreport)
+    implementation(libs.rootencoder)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

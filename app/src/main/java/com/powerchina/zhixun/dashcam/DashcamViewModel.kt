@@ -766,11 +766,34 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             refreshClips()
             result.onSuccess { compressed ->
                 exportRecordingToGallery(compressed.sdcard0File)
-                showMessage("保存成功")
+                scheduleVideoUpload(
+                    file = compressed.sdcard0File,
+                    durationSec = _elapsedSeconds.value.coerceAtLeast(1),
+                    recordTimeMs = compressed.sdcard0File.lastModified().takeIf { it > 0L }
+                        ?: System.currentTimeMillis(),
+                )
             }.onFailure { err ->
                 Log.w(DashcamVideoCompressor.TAG, "压缩失败，保留原片: ${file.name}", err)
                 exportRecordingToGallery(file)
+                scheduleVideoUpload(
+                    file = file,
+                    durationSec = _elapsedSeconds.value.coerceAtLeast(1),
+                    recordTimeMs = file.lastModified().takeIf { it > 0L }
+                        ?: System.currentTimeMillis(),
+                )
             }
+        }
+    }
+
+    private fun scheduleVideoUpload(file: File, durationSec: Int, recordTimeMs: Long) {
+        viewModelScope.launch {
+            val status = VideoUploadCoordinator.onLocalVideoReady(
+                context = app,
+                videoFile = file,
+                durationSec = durationSec,
+                recordTimeMs = recordTimeMs,
+            )
+            showMessage(status)
         }
     }
 

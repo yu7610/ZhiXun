@@ -4,8 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import com.powerchina.zhixun.audio.utils.OpusEncoder
 import com.powerchina.zhixun.data.MqttConfig
 import com.powerchina.zhixun.physicalkey.PhotoKeyLog
+import com.powerchina.zhixun.xiaozhi.VoiceFlowLog
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +17,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.MqttCallbackExtended
@@ -78,6 +81,7 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
     private var sessionId: String? = null
     private var helloTimeoutJob: Job? = null
     private var reconnectJob: Job? = null
+    private var natKeepaliveJob: Job? = null
     private var lastConfig: MqttConfig? = null
 
     // UDP / AES
@@ -90,6 +94,9 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
     private val remoteSequence = AtomicLong(0)
     private val udpReceiveRunning = AtomicBoolean(false)
     private val channelLock = Any()
+    private val silencePcm16k60ms = ByteArray(16_000 * 60 / 1000 * 2)
+    private var punchEncoder: OpusEncoder? = null
+    private val punchEncoderLock = Any()
 
     private val _events = MutableSharedFlow<MqttUdpEvent>(
         replay = 1,
@@ -402,10 +409,47 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
         Log.i(TAG, "UDP 已就绪 $server:$port localPort=${udpSocket?.localPort}")
     }
 
-    /** 发送空 Opus 帧，打通 NAT 回程，使服务端 TTS 能到达本机 */
+    /** 发送 Opus 静音帧打通 NAT（空包对部分运营商无效） */
     private fun punchUdpHole() {
-        val ok = sendUdpPayload(ByteArray(0), isPunch = true)
+        val ok = sendSilencePunch()
         Log.i(TAG, "UDP NAT 打洞 ${if (ok) "已发送" else "失败"}")
+    }
+
+    private fun encodeSilenceOpus(): ByteArray {
+        synchronized(punchEncoderLock) {
+            val encoder = punchEncoder ?: OpusEncoder(16_000, 1, 60).also { punchEncoder = it }
+            return encoder.encodeSync(silencePcm16k60ms) ?: ByteArray(0)
+        }
+    }
+
+    private fun sendSilencePunch(): Boolean =
+        sendUdpPayload(encodeSilenceOpus(), isPunch = true)
+
+    /**
+     * 仅唤醒问候前使用：持续上行静音 Opus，直到收到问候下行或显式 stop。
+     * 其它对话有真实麦克风上行，无需保活。
+     */
+    fun startWakeGreetingNatKeepalive() {
+        if (!isHandshakeComplete) return
+        natKeepaliveJob?.cancel()
+        natKeepaliveJob = scope.launch {
+            Log.i(TAG, "唤醒问候 UDP NAT keepalive 开始")
+            VoiceFlowLog.step("udp.nat", "wake_greeting_keepalive_start")
+            while (isActive && isHandshakeComplete) {
+                sendSilencePunch()
+                delay(60)
+            }
+        }
+    }
+
+    fun stopWakeGreetingNatKeepalive(reason: String = "stop") {
+        val was = natKeepaliveJob != null
+        natKeepaliveJob?.cancel()
+        natKeepaliveJob = null
+        if (was) {
+            Log.i(TAG, "唤醒问候 UDP NAT keepalive 停止 reason=$reason")
+            VoiceFlowLog.step("udp.nat", "wake_greeting_keepalive_stop reason=$reason")
+        }
     }
 
     private fun handleUdpPacket(data: ByteArray) {
@@ -878,6 +922,7 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
     }
 
     private fun closeAudioChannel(sendGoodbye: Boolean) {
+        stopWakeGreetingNatKeepalive("close_audio_channel")
         if (sendGoodbye && sessionId != null && mqttConnected) {
             val message = JsonObject().apply {
                 addProperty("session_id", sessionId)
@@ -899,6 +944,13 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
             udpPort = 0
             localSequence.set(0)
             remoteSequence.set(0)
+        }
+        synchronized(punchEncoderLock) {
+            try {
+                punchEncoder?.release()
+            } catch (_: Exception) {
+            }
+            punchEncoder = null
         }
     }
 
