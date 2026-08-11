@@ -2,6 +2,7 @@ package com.powerchina.zhixun.xiaozhi
 
 import android.content.Context
 import android.util.Log
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.powerchina.zhixun.network.OkHttpClientFactory
@@ -20,11 +21,14 @@ data class VisionExplainResult(
 
 /**
  * 拍照隐患检测 HTTP 接口（multipart/form-data）。
+ * 基址：http://8.134.202.195:8001/
  */
 object XiaozhiVisionClient {
 
     private const val TAG = PhotoKeyLog.TAG
-    const val DETECT_IMAGE_URL = "http://8.134.202.195:6086/recoder/detectImageFile"
+    const val BASE_URL = "http://8.134.202.195:8001"
+    /** 兼容旧调用：常规检测走 /detect/xiaozhi */
+    const val DETECT_IMAGE_URL = "$BASE_URL/detect/xiaozhi"
     private const val NO_HAZARD_TEXT = "无安全隐患"
 
     @Volatile
@@ -35,7 +39,7 @@ object XiaozhiVisionClient {
             httpClient ?: OkHttpClientFactory.create(
                 context = context.applicationContext,
                 connectTimeoutSec = 15,
-                readTimeoutSec = 60,
+                readTimeoutSec = 90,
                 writeTimeoutSec = 60,
             ).also { httpClient = it }
         }
@@ -46,43 +50,64 @@ object XiaozhiVisionClient {
         deviceId: String,
         jpegBytes: ByteArray,
         filename: String,
+        kind: VisionCheckKind = VisionCheckKind.NORMAL,
     ): Result<VisionExplainResult> = runCatching {
         val mac = normalizeMacWithColons(deviceId)
         require(mac.isNotBlank()) { "未配置设备 MAC 地址" }
         val safeName = filename.ifBlank { "photo.jpg" }
-        val topic = "drone/device/$mac"
 
-        val body = MultipartBody.Builder()
+        val bodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("deviceId", mac)
-            .addFormDataPart("topic", topic)
             .addFormDataPart(
                 "image",
                 safeName,
                 jpegBytes.toRequestBody("image/jpeg".toMediaType()),
             )
-            .build()
+
+        val url = when (kind) {
+            VisionCheckKind.NORMAL -> {
+                bodyBuilder.addFormDataPart("deviceId", mac)
+                bodyBuilder.addFormDataPart("uploadOnViolation", "true")
+                "$BASE_URL/detect/xiaozhi"
+            }
+            VisionCheckKind.SHATOUJIAO -> {
+                bodyBuilder.addFormDataPart("project_id", "shatoujiao")
+                "$BASE_URL/detect"
+            }
+            VisionCheckKind.ENTRANCE -> {
+                bodyBuilder.addFormDataPart("project_id", "entrance")
+                "$BASE_URL/detect"
+            }
+            VisionCheckKind.WEARABLE -> {
+                bodyBuilder.addFormDataPart("project_id", "wearable")
+                "$BASE_URL/detect"
+            }
+            VisionCheckKind.FIRSTAID -> {
+                bodyBuilder.addFormDataPart("project_id", "firstaid")
+                "$BASE_URL/detect"
+            }
+        }
 
         Log.i(
             TAG,
-            "POST detectImage deviceId=$mac topic=$topic file=$safeName jpeg=${jpegBytes.size}B",
+            "POST detect kind=$kind url=$url deviceId=$mac file=$safeName jpeg=${jpegBytes.size}B",
         )
 
         val request = Request.Builder()
-            .url(DETECT_IMAGE_URL)
-            .post(body)
+            .url(url)
+            .post(bodyBuilder.build())
             .build()
 
         client(context).newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
-            Log.i(TAG, "隐患检测 HTTP ${response.code} 响应: $raw")
+            Log.i(TAG, "隐患检测 HTTP ${response.code} kind=$kind 响应: ${raw.take(800)}")
             if (response.code != 200) {
                 throw IllegalStateException("隐患检测 HTTP ${response.code}: $raw")
             }
-            parseDetectImageResponse(raw, safeName)
+            parseDetectResponse(raw, safeName, kind)
         }
     }.onFailure { e ->
-        Log.e(TAG, "隐患检测失败", e)
+        Log.e(TAG, "隐患检测失败 kind=$kind", e)
     }
 
     /** MAC 地址保留 ":" 分隔 */
@@ -99,21 +124,19 @@ object XiaozhiVisionClient {
         return trimmed
     }
 
-    private fun parseDetectImageResponse(raw: String, filename: String): VisionExplainResult {
-        val text = extractDetectText(raw)
-        val responseText = if (text.isNotBlank()) {
-            JsonObject().apply {
-                addProperty("success", true)
-                addProperty("filename", filename)
-                addProperty("text", text)
-            }.toString()
-        } else {
-            NO_HAZARD_TEXT
-        }
-        Log.i(
-            TAG,
-            "隐患检测解析 text=${text.ifBlank { "(空→无安全隐患)" }} mcpPayload=$responseText",
-        )
+    private fun parseDetectResponse(
+        raw: String,
+        filename: String,
+        kind: VisionCheckKind,
+    ): VisionExplainResult {
+        val text = extractHazardText(raw).ifBlank { NO_HAZARD_TEXT }
+        val responseText = JsonObject().apply {
+            addProperty("success", true)
+            addProperty("filename", filename)
+            addProperty("check", kind.name.lowercase())
+            addProperty("text", text)
+        }.toString()
+        Log.i(TAG, "隐患检测解析 kind=$kind text=$text")
         return VisionExplainResult(
             success = true,
             response = responseText,
@@ -121,17 +144,32 @@ object XiaozhiVisionClient {
         )
     }
 
-    /** 解析 data.text；无效或缺失时返回空串（上层回「无安全隐患」） */
-    private fun extractDetectText(raw: String): String = runCatching {
+    /**
+     * 兼容：
+     * - /detect/xiaozhi：is_violation + violations[{violation_name}]
+     * - /detect：violations 列表
+     * - 旧 recoder：data.text
+     */
+    private fun extractHazardText(raw: String): String = runCatching {
         val root = JsonParser.parseString(raw).asJsonObject
-        val data = root.getAsJsonObject("data") ?: return ""
-        val element = data.get("text") ?: return ""
-        when {
-            element.isJsonNull -> ""
-            element.isJsonPrimitive && element.asJsonPrimitive.isString ->
-                element.asString.trim()
-            else -> element.toString().trim()
+        root.getAsJsonObject("data")?.get("text")?.takeIf { !it.isJsonNull }?.asString?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return@runCatching it }
+
+        val violations = root.getAsJsonArray("violations")
+        if (violations != null && violations.size() > 0) {
+            val names = violations.mapNotNull { el ->
+                val obj = el.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                obj.get("violation_name")?.asString?.trim()?.ifBlank { null }
+                    ?: obj.get("name")?.asString?.trim()?.ifBlank { null }
+                    ?: obj.get("description")?.asString?.trim()?.ifBlank { null }
+            }
+            if (names.isNotEmpty()) return@runCatching names.joinToString("；")
         }
+
+        val isViolation = root.get("is_violation")?.asBoolean == true
+        if (isViolation) return@runCatching "检测到安全隐患"
+        ""
     }.getOrDefault("")
 
     /** 展示/语音播报用：从 detect 结果中提取可读文本 */
@@ -148,7 +186,21 @@ object XiaozhiVisionClient {
         val text = displayTextFromResult(
             VisionExplainResult(success = true, response = description, rawJson = ""),
         )
-        val content = com.google.gson.JsonArray()
+        val content = JsonArray()
+        content.add(
+            JsonObject().apply {
+                addProperty("type", "text")
+                addProperty("text", text)
+            },
+        )
+        return JsonObject().apply {
+            add("content", content)
+            addProperty("isError", false)
+        }
+    }
+
+    fun buildPlainToolResult(text: String): JsonObject {
+        val content = JsonArray()
         content.add(
             JsonObject().apply {
                 addProperty("type", "text")

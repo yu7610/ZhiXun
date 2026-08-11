@@ -33,6 +33,9 @@ object XiaozhiMcpHandler {
 
     private const val TAG = PhotoKeyLog.TAG
     private const val TOOL_TAKE_PHOTO = "self.camera.take_photo"
+    private const val TOOL_GET_STATUS = "self.get_device_status"
+    private const val TOOL_SET_VOLUME = "self.audio_speaker.set_volume"
+    private const val TOOL_SET_BRIGHTNESS = "self.screen.set_brightness"
     private const val PHOTO_CAPTURE_TIMEOUT_MS = 15_000L
     /** TTS/STT 信号后留给 MCP tools/call 的窗口，避免与 fallback 抢锁 */
     private const val MCP_FALLBACK_DELAY_MS = 1_500L
@@ -190,16 +193,67 @@ object XiaozhiMcpHandler {
             return
         }
         val name = params.get("name")?.asString.orEmpty()
-        if (name != TOOL_TAKE_PHOTO) {
+        val arguments = params.getAsJsonObject("arguments")
+        Log.i(TAG, "★ 服务端调用 tools/call name=$name")
+
+        val app = application
+        when (name) {
+            TOOL_GET_STATUS -> {
+                if (app == null) {
+                    mqtt.sendMcpError(id, "Application not ready")
+                    return
+                }
+                val json = DeviceControlHelper.getDeviceStatusJson(app)
+                mqtt.sendMcpToolResult(id, XiaozhiVisionClient.buildPlainToolResult(json))
+                return
+            }
+            TOOL_SET_VOLUME -> {
+                if (app == null) {
+                    mqtt.sendMcpError(id, "Application not ready")
+                    return
+                }
+                val volume = arguments?.get("volume")?.asInt
+                if (volume == null) {
+                    mqtt.sendMcpError(id, "Missing volume")
+                    return
+                }
+                val ok = DeviceControlHelper.setVolumePercent(app, volume)
+                mqtt.sendMcpToolResult(
+                    id,
+                    XiaozhiVisionClient.buildPlainToolResult(if (ok) "true" else "false"),
+                )
+                return
+            }
+            TOOL_SET_BRIGHTNESS -> {
+                if (app == null) {
+                    mqtt.sendMcpError(id, "Application not ready")
+                    return
+                }
+                val brightness = arguments?.get("brightness")?.asInt
+                if (brightness == null) {
+                    mqtt.sendMcpError(id, "Missing brightness")
+                    return
+                }
+                val ok = DeviceControlHelper.setBrightnessPercent(app, brightness)
+                mqtt.sendMcpToolResult(
+                    id,
+                    XiaozhiVisionClient.buildPlainToolResult(if (ok) "true" else "false"),
+                )
+                return
+            }
+        }
+
+        val checkKind = VisionCheckKind.fromToolName(name)
+        if (checkKind == null) {
             mqtt.sendMcpError(id, "Unknown tool: $name")
             return
         }
-        val arguments = params.getAsJsonObject("arguments")
+
         val question = arguments?.get("question")?.asString?.ifBlank { null } ?: "请描述这张照片"
 
         // fallback 已上传完：直接回传，避免再次拍照导致服务端重复播报
         val ready = pendingUploadResult
-        if (ready != null) {
+        if (ready != null && checkKind == VisionCheckKind.NORMAL) {
             pendingUploadResult = null
             cancelTakePhotoFallback()
             val gen = XiaozhiAppEvents.currentPhotoSessionGeneration()
@@ -209,7 +263,7 @@ object XiaozhiMcpHandler {
         }
 
         // 本轮已回传过：应答但不带完整描述，降低二次 TTS
-        if (mcpToolResultSent.get()) {
+        if (mcpToolResultSent.get() && checkKind == VisionCheckKind.NORMAL) {
             Log.w(TAG, "tools/call 重复，本轮已回传过 id=$id")
             mqtt.sendMcpToolResult(
                 id,
@@ -218,7 +272,7 @@ object XiaozhiMcpHandler {
             return
         }
 
-        val app = application ?: run {
+        if (app == null) {
             mqtt.sendMcpError(id, "Application not ready")
             return
         }
@@ -230,6 +284,7 @@ object XiaozhiMcpHandler {
                 mcpId = id,
                 question = question,
                 trigger = "mcp_tools_call",
+                kind = checkKind,
             )
         }
     }
@@ -248,6 +303,7 @@ object XiaozhiMcpHandler {
                 mcpId = null,
                 question = "请描述这张照片",
                 trigger = trigger,
+                kind = VisionCheckKind.NORMAL,
             )
         }
     }
@@ -261,6 +317,7 @@ object XiaozhiMcpHandler {
         mcpId: Int?,
         question: String,
         trigger: String,
+        kind: VisionCheckKind,
     ) {
         if (!photoCaptureInFlight.compareAndSet(false, true)) {
             if (mcpId != null) {
@@ -272,7 +329,7 @@ object XiaozhiMcpHandler {
             Log.w(TAG, "跳过重复拍照：已在进行中 trigger=$trigger mcpId=null")
             return
         }
-        Log.i(TAG, "开始拍照上传 detectImageFile trigger=$trigger mcpId=$mcpId")
+        Log.i(TAG, "开始拍照上传 kind=$kind trigger=$trigger mcpId=$mcpId")
         cancelTakePhotoFallback()
         mcpToolResultSent.set(false)
         var sessionEngaged = false
@@ -284,9 +341,14 @@ object XiaozhiMcpHandler {
         var photoFileForLocal: File? = null
         try {
             if (!XiaozhiAppEvents.isPhotoSessionActive()) {
-                Log.w(TAG, "忽略无会话 take_photo trigger=$trigger")
-                mcpId?.let { mqtt.sendMcpError(it, "无进行中的拍照请求") }
-                return
+                if (mcpId != null) {
+                    // 云端直接 tools/call（密闭空间等）：自动开启拍照会话
+                    XiaozhiAppEvents.beginPhotoSession()
+                } else {
+                    Log.w(TAG, "忽略无会话 take_photo trigger=$trigger")
+                    mcpId?.let { mqtt.sendMcpError(it, "无进行中的拍照请求") }
+                    return
+                }
             }
             sessionEngaged = true
             sessionGeneration = XiaozhiAppEvents.currentPhotoSessionGeneration()
@@ -310,6 +372,7 @@ object XiaozhiMcpHandler {
                 application = app,
                 photoFile = photoFile,
                 prompt = question,
+                kind = kind,
             )
             val visionResult = upload.getOrThrow()
             val toolPayload = XiaozhiVisionClient.buildToolCallResult(visionResult.response)
@@ -344,7 +407,7 @@ object XiaozhiMcpHandler {
             }
             Log.i(
                 TAG,
-                "take_photo 完成 trigger=$trigger mcpId=$mcpId gen=$sessionGeneration " +
+                "拍照完成 kind=$kind trigger=$trigger mcpId=$mcpId gen=$sessionGeneration " +
                     "mcpDelivered=$mcpDelivered",
             )
         } catch (e: TimeoutCancellationException) {

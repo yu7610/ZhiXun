@@ -29,6 +29,9 @@ object ScreenOnHelper {
     private var inStandbyMode = false
     private var standbyPhase = StandbyPhase.NORMAL
     private var savedWindowBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+    /** 用户设定的窗口亮度 0~1；待机恢复时优先还原到此值 */
+    @Volatile
+    private var userPreferredBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
 
     /** 待机黑屏休眠 / 亮屏恢复时通知业务层（断连、重连小智等） */
     interface StandbyScreenListener {
@@ -50,6 +53,12 @@ object ScreenOnHelper {
         attachedActivity = WeakReference(activity)
         // 默认常亮；仅 enterStandbyMode 后才允许息屏
         keepScreenOn(activity)
+        // 恢复用户设定亮度（Activity 重建后窗口亮度会丢）
+        if (userPreferredBrightness != WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE) {
+            val lp = activity.window.attributes
+            lp.screenBrightness = userPreferredBrightness
+            activity.window.attributes = lp
+        }
         Log.d(TAG, "attach ${activity.javaClass.simpleName}，非待机常亮")
     }
 
@@ -113,6 +122,36 @@ object ScreenOnHelper {
         }
     }
 
+    fun attachedActivityOrNull(): Activity? = attachedActivity?.get()
+
+    /**
+     * 设置用户亮度（0~1），立即作用到当前 Activity 窗口。
+     * 不依赖 WRITE_SETTINGS；待机恢复也会回到此亮度。
+     */
+    fun applyUserBrightness(activity: Activity, brightness01: Float) {
+        val value = brightness01.coerceIn(0.01f, 1f)
+        userPreferredBrightness = value
+        // 待机变暗/黑屏前已缓存的「正常亮度」一并更新，避免恢复到旧值
+        if (savedWindowBrightness != WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE) {
+            savedWindowBrightness = value
+        }
+        if (standbyPhase == StandbyPhase.OFF) {
+            Log.i(TAG, "用户设亮度 $value，当前黑屏待机，唤醒后生效")
+            return
+        }
+        val lp = activity.window.attributes
+        lp.screenBrightness = value
+        activity.window.attributes = lp
+        // 若正处于待机变暗，直接回到正常相位并重置计时
+        if (inStandbyMode && standbyPhase == StandbyPhase.DIM) {
+            standbyPhase = StandbyPhase.NORMAL
+            resetStandbyTimers(activity)
+        }
+        Log.i(TAG, "窗口亮度已设为 $value")
+    }
+
+    fun currentUserBrightnessOrNone(): Float = userPreferredBrightness
+
     private fun resetStandbyTimers(activity: Activity) {
         cancelStandbyTimers()
         standbyPhase = StandbyPhase.NORMAL
@@ -168,12 +207,18 @@ object ScreenOnHelper {
     }
 
     private fun restoreStandbyBrightness(activity: Activity) {
-        if (savedWindowBrightness == WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE) {
-            standbyPhase = StandbyPhase.NORMAL
-            return
+        val target = when {
+            userPreferredBrightness != WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE ->
+                userPreferredBrightness
+            savedWindowBrightness != WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE ->
+                savedWindowBrightness
+            else -> {
+                standbyPhase = StandbyPhase.NORMAL
+                return
+            }
         }
         val lp = activity.window.attributes
-        lp.screenBrightness = savedWindowBrightness
+        lp.screenBrightness = target
         activity.window.attributes = lp
         savedWindowBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         standbyPhase = StandbyPhase.NORMAL

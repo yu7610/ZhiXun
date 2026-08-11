@@ -16,13 +16,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
 /**
- * 进入定位页后绑定连续定位回调，约每 6 秒上报 receiveLocation。
+ * 进入定位页后绑定连续定位回调，按间隔上报 receiveLocation。
  */
 object LocationReportCoordinator {
 
     private const val TAG = BaiduLocationReporter.TAG
-    /** 略小于 6s，避免回调稍早被当成重复上报 */
-    private const val MIN_REPORT_INTERVAL_MS = 4_500L
+    /** 略小于 scanSpan，避免同轮重复上报 */
+    private const val MIN_REPORT_INTERVAL_MS = 2_500L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var uploadListener: ((BDLocation) -> Unit)? = null

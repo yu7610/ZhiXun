@@ -100,7 +100,7 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
                 state.copy(altitudeText = LocationAltitudeHelper.format(altitudeM))
             }
         }.also { it.start() }
-        Log.i(TAG, "定位页已启动定位脉冲 ${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
+        Log.i(TAG, "定位页已启动定位脉冲 interval=${BaiduLocationReporter.SCAN_INTERVAL_MS}ms")
     }
 
     private fun stopTracking() {
@@ -108,8 +108,9 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         trackingStarted = false
         altitudeWatcher?.stop()
         altitudeWatcher = null
-        BaiduLocationReporter.removeListener(mapListener)
+        // 先停上报监听，再移地图监听；最后一个 listener 会触发 BaiduLocationReporter.stop()
         LocationReportCoordinator.stop()
+        BaiduLocationReporter.removeListener(mapListener)
         Log.i(TAG, "离开定位页，已停止定位与上报")
     }
 
@@ -126,13 +127,31 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
         val point = TrackPoint(location.latitude, location.longitude)
 
         _uiState.update { state ->
-            val trackPoints = state.trackPoints + point
+            val lastTrack = state.trackPoints.lastOrNull()
+            val trackPoints = if (LocationQualityFilter.shouldAppendTrack(
+                    lastTrack,
+                    location.latitude,
+                    location.longitude,
+                )
+            ) {
+                val next = state.trackPoints + point
+                // 防止长时间停留轨迹无限增长
+                if (next.size > MAX_TRACK_POINTS) {
+                    next.takeLast(MAX_TRACK_POINTS)
+                } else {
+                    next
+                }
+            } else {
+                state.trackPoints
+            }
             state.copy(
                 currentLat = location.latitude,
                 currentLng = location.longitude,
-                coordinateText = LocationTrackRepository.formatCoordinate(
-                    location.latitude,
-                    location.longitude,
+                coordinateText = LocationTrackRepository.formatCoordinateWithAccuracy(
+                    lat = location.latitude,
+                    lng = location.longitude,
+                    isGnss = LocationQualityFilter.isGnssFix(location),
+                    radiusM = location.radius,
                 ),
                 speedText = LocationTrackRepository.formatSpeedMps(speedMps),
                 altitudeText = LocationAltitudeHelper.format(lastAltitudeM),
@@ -210,5 +229,6 @@ class LocationViewModel(application: Application) : AndroidViewModel(application
 
     companion object {
         private const val TAG = "LocationViewModel"
+        private const val MAX_TRACK_POINTS = 2_000
     }
 }

@@ -6,6 +6,7 @@ import android.os.Bundle
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.powerchina.zhixun.xiaozhi.DeviceControlHelper
 
 /**
  * 应用进入前台后启用物理键拦截；为所有 Activity 安装 Window 按键回调。
@@ -35,6 +36,7 @@ object PhysicalKeyLifecycle {
             override fun onActivityResumed(activity: Activity) {
                 resumedActivity = activity
                 PhysicalKeyWindowCallback.install(activity)
+                DeviceControlHelper.reapplyPersistedBrightness(activity)
             }
 
             override fun onActivityStarted(activity: Activity) = Unit

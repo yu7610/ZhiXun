@@ -8,7 +8,7 @@ import androidx.core.content.ContextCompat
 
 /**
  * 应用级：只做百度 SDK 初始化。
- * 定位脉冲与上报由定位页（[LocationViewModel]）进入时启动、离开时停止。
+ * 连续定位与上报由定位页（[LocationViewModel]）进入时启动、离开时停止。
  */
 object LocationBootstrap {
 

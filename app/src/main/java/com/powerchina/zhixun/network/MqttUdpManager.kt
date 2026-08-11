@@ -694,28 +694,53 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
     }
 
     fun sendMcpToolsListResult(id: Int) {
-        val tool = JsonObject().apply {
-            addProperty("name", "self.camera.take_photo")
-            addProperty(
-                "description",
-                "Always remember you have a camera.\n" +
-                    "Take a photo, detect safety hazards in the image.\n" +
-                    "If hazards are found, describe the hazards; " +
-                    "otherwise, respond that no safety hazards are detected.\n" +
-                    "Return:\n" +
-                    "  A JSON object that provides the photo information.",
-            )
-            add(
-                "inputSchema",
-                JsonObject().apply {
-                    addProperty("type", "object")
-                    add("properties", JsonObject())
-                    add("required", com.google.gson.JsonArray())
-                },
-            )
-        }
         val tools = com.google.gson.JsonArray()
-        tools.add(tool)
+        tools.add(
+            mcpTool(
+                name = "self.get_device_status",
+                description = "Provides the real-time information of the device, including the current status of the audio speaker, screen, etc.\n" +
+                    "Use this tool for: \n" +
+                    "1. Answering questions about current condition (e.g. what is the current volume of the audio speaker?)\n" +
+                    "2. As the first step to control the device (e.g. turn up / down the volume of the audio speaker, etc.)",
+            ),
+        )
+        tools.add(
+            mcpTool(
+                name = "self.audio_speaker.set_volume",
+                description = "Set the volume of the audio speaker. If the current volume is unknown, you must call `self.get_device_status` tool first and then call this tool.",
+                properties = JsonObject().apply {
+                    add(
+                        "volume",
+                        JsonObject().apply {
+                            addProperty("type", "integer")
+                            addProperty("minimum", 0)
+                            addProperty("maximum", 100)
+                        },
+                    )
+                },
+                required = listOf("volume"),
+            ),
+        )
+        tools.add(
+            mcpTool(
+                name = "self.screen.set_brightness",
+                description = "Set the brightness of the screen.",
+                properties = JsonObject().apply {
+                    add(
+                        "brightness",
+                        JsonObject().apply {
+                            addProperty("type", "integer")
+                            addProperty("minimum", 0)
+                            addProperty("maximum", 100)
+                        },
+                    )
+                },
+                required = listOf("brightness"),
+            ),
+        )
+        for (kind in com.powerchina.zhixun.xiaozhi.VisionCheckKind.entries) {
+            tools.add(mcpTool(name = kind.toolName, description = kind.description))
+        }
         sendMcpPayload(
             JsonObject().apply {
                 addProperty("jsonrpc", "2.0")
@@ -723,6 +748,28 @@ class MqttUdpManager(@Suppress("UNUSED_PARAMETER") private val context: Context)
                 add("result", JsonObject().apply { add("tools", tools) })
             },
         )
+    }
+
+    private fun mcpTool(
+        name: String,
+        description: String,
+        properties: JsonObject = JsonObject(),
+        required: List<String> = emptyList(),
+    ): JsonObject {
+        val requiredArr = com.google.gson.JsonArray()
+        required.forEach { requiredArr.add(it) }
+        return JsonObject().apply {
+            addProperty("name", name)
+            addProperty("description", description)
+            add(
+                "inputSchema",
+                JsonObject().apply {
+                    addProperty("type", "object")
+                    add("properties", properties)
+                    add("required", requiredArr)
+                },
+            )
+        }
     }
 
     fun sendMcpToolResult(id: Int, result: JsonObject) {

@@ -22,6 +22,7 @@ object XiaozhiPhotoUploader {
         application: Application,
         photoFile: File,
         @Suppress("UNUSED_PARAMETER") prompt: String = "请描述这张照片",
+        kind: VisionCheckKind = VisionCheckKind.NORMAL,
     ): Result<VisionExplainResult> = withContext(Dispatchers.IO) {
         runCatching {
             var jpegBytes = compressJpegForUpload(photoFile, maxWidth = 480, quality = 70)
@@ -35,7 +36,7 @@ object XiaozhiPhotoUploader {
             val macAddress = ConfigManager(application).loadConfig().macAddress
             Log.i(
                 TAG,
-                "上传照片到 detectImageFile ${photoFile.name} size=${jpegBytes.size} bytes",
+                "上传照片 kind=$kind ${photoFile.name} size=${jpegBytes.size} bytes",
             )
 
             XiaozhiVisionClient.detectImageFile(
@@ -43,9 +44,10 @@ object XiaozhiPhotoUploader {
                 deviceId = macAddress,
                 jpegBytes = jpegBytes,
                 filename = photoFile.name,
+                kind = kind,
             ).getOrThrow()
         }.onFailure { e ->
-            Log.e(TAG, "MCP 视觉上传失败", e)
+            Log.e(TAG, "MCP 视觉上传失败 kind=$kind", e)
         }
     }
 
