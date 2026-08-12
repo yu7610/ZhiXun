@@ -42,6 +42,13 @@ class DashcamRtspEngine(
             Log.i(tag, "RTSP 推流连接成功")
             streaming.set(true)
             streamRetryCount.set(0)
+            lastStreamPath?.let { path ->
+                Log.i(
+                    tag,
+                    "拉流地址(无 token 时试): rtsp://${DashcamRtspConfig.HOST}:${DashcamRtspConfig.PORT}/" +
+                        "${DashcamRtspConfig.APP}/$path/${DashcamRtspConfig.STREAM_SUFFIX}",
+                )
+            }
         }
 
         override fun onConnectionFailed(reason: String) {
@@ -79,7 +86,13 @@ class DashcamRtspEngine(
             }
         }
 
-        override fun onNewBitrate(bitrate: Long) = Unit
+        override fun onNewBitrate(bitrate: Long) {
+            if (bitrate <= 0L || !streaming.get()) return
+            val now = System.currentTimeMillis()
+            if (now - lastBitrateLogAtMs < 3_000L) return
+            lastBitrateLogAtMs = now
+            Log.i(tag, "RTSP 推流中 bitrate=${bitrate / 1000}kbps（有码率=画面在推）")
+        }
 
         override fun onDisconnect() {
             Log.i(tag, "RTSP 推流断开")
@@ -100,6 +113,8 @@ class DashcamRtspEngine(
     private val prepared = AtomicBoolean(false)
     private val streaming = AtomicBoolean(false)
     private val recording = AtomicBoolean(false)
+    @Volatile private var lastStreamPath: String? = null
+    @Volatile private var lastBitrateLogAtMs = 0L
 
     init {
         streamer = RtspStream(context.applicationContext, connectChecker)
@@ -262,7 +277,9 @@ class DashcamRtspEngine(
         }
         if (streamer.isStreaming) return
         val terCode = ConfigManager(context).loadConfig().macAddress
-        val url = DashcamRtspConfig.buildPushUrl(DashcamRtspConfig.deviceStreamName(terCode))
+        val streamPath = DashcamRtspConfig.deviceStreamName(terCode)
+        lastStreamPath = streamPath
+        val url = DashcamRtspConfig.buildPushUrl(streamPath)
         runCatching {
             streamer.requestKeyframe()
             streamer.startStream(url)

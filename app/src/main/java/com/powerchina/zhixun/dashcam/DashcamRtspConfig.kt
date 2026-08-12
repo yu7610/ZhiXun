@@ -22,8 +22,7 @@ object DashcamRtspConfig {
     const val USE_DOC_QUERY_STYLE = false
 
     /** 推流鉴权 token（文档提供） */
-    const val AUTH_TOKEN =
-        "eyJhbGciOiJIUzI1NiJ9.eyJ1IjoiYWRtaW4iLCJleHAiOjE3ODUzNzc5NTksImlhdCI6MTc4NTI5MTU1OX0.Lnokp4bUKLE_0xM1wWxl7ZLndaBZM_0_j8mOamcyjx0"
+    const val AUTH_TOKEN = "YWRtaW46eWZ6eGhrMDE"
 
     /**
      * @param deviceName 设备名/编号，对应路径中的 stream 段（如 ae01 / MAC）

@@ -105,12 +105,14 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         get() = cameraSession?.recordingController
     private var timerJob: Job? = null
     private var frameUploadJob: Job? = null
-    private var compressJob: Job? = null
+    private var segmentRotateJob: Job? = null
     /** 用 elapsedRealtime 累计，避免亮屏重绑/协程重启把秒数清零 */
     private var recordingStartedAtElapsedMs = 0L
     private val frameCaptureInProgress = AtomicBoolean(false)
     private val photoCaptureInProgress = AtomicBoolean(false)
     private val recordingStartInProgress = AtomicBoolean(false)
+    /** 正在做 3 分钟分段切换，勿当成用户停录 */
+    private val segmentRotating = AtomicBoolean(false)
     private var recordingStartTimeoutJob: Job? = null
     private var hasAutoStarted = false
     private var userStoppedRecording = false
@@ -124,6 +126,8 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         private const val FRAME_UPLOAD_INTERVAL_MS = 5_000L
         private const val CAMERA_READY_RETRY_MS = 250L
         private const val CAMERA_READY_MAX_ATTEMPTS = 80
+        /** 本地录像分段时长：满 3 分钟停本段、压缩保存并开下一段 */
+        private const val SEGMENT_DURATION_MS = 3 * 60 * 1000L
     }
 
     init {
@@ -182,6 +186,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         DashcamRecordingForegroundService.ensureStopped(app)
         stopTimer()
         stopFrameUploadLoop()
+        stopSegmentRotateWatch()
     }
 
     private fun waitForCameraReady(onReady: () -> Unit) {
@@ -570,7 +575,9 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             showMessage("请先停止录音")
             return
         }
-        if (controller.isRecording || _isRecording.value) return
+        if (controller.isRecording) return
+        // 分段轮转时 UI 仍显示录像中，需允许立刻开下一段
+        if (_isRecording.value && !segmentRotating.get()) return
         if (!recordingStartInProgress.compareAndSet(false, true)) return
         _isRecordingStarting.value = true
         scheduleRecordingStartTimeout()
@@ -598,6 +605,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 DashcamRecordingForegroundService.ensureStarted(app)
                 startTimer()
                 startFrameUploadLoop()
+                startSegmentRotateWatch()
             },
             onError = { err ->
                 if (recordingController !== controller) {
@@ -607,6 +615,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 cancelRecordingStartTimeout()
                 setRecordingStarting(false)
                 _isRecording.value = false
+                stopSegmentRotateWatch()
                 DashcamRecordingForegroundService.ensureStopped(app)
                 stopTimer()
                 stopFrameUploadLoop()
@@ -637,6 +646,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
     }
 
     private fun stopRecording(markUserStopped: Boolean = true) {
+        stopSegmentRotateWatch()
         val controller = recordingController
         if (controller == null) {
             if (_isRecording.value || recordingStartInProgress.get()) {
@@ -692,6 +702,78 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /** 满 3 分钟：停本段 → 压缩保存 → 空间清理 → 自动开下一段（用户未主动停止时） */
+    private fun startSegmentRotateWatch() {
+        segmentRotateJob?.cancel()
+        segmentRotateJob = viewModelScope.launch {
+            delay(SEGMENT_DURATION_MS)
+            if (!isActive) return@launch
+            if (!_isRecording.value || userStoppedRecording || segmentRotating.get()) return@launch
+            Log.i(TAG, "分段录像：已满 ${SEGMENT_DURATION_MS / 1000}s，保存本段并开下一段")
+            rotateRecordingSegment()
+        }
+    }
+
+    private fun stopSegmentRotateWatch() {
+        segmentRotateJob?.cancel()
+        segmentRotateJob = null
+    }
+
+    private fun rotateRecordingSegment() {
+        val controller = recordingController ?: return
+        if (!controller.isRecording) return
+        if (!segmentRotating.compareAndSet(false, true)) return
+        stopSegmentRotateWatch()
+        val segmentDurationSec = _elapsedSeconds.value.coerceAtLeast(1)
+        // 分段切换：不停前台服务；先清 _isRecording 以便立刻 startRecording 下一段
+        controller.stopRecording { result ->
+            viewModelScope.launch {
+                try {
+                    result.onSuccess { output ->
+                        withContext(Dispatchers.IO) {
+                            DashcamRecordingStore.publishVideoOutput(app, output)
+                        }
+                        refreshClips()
+                        scheduleCompressRecording(output, durationSec = segmentDurationSec)
+                    }.onFailure { err ->
+                        Log.w(TAG, "分段停录失败: ${err.message}")
+                    }
+                    if (userStoppedRecording) {
+                        _isRecording.value = false
+                        setRecordingStarting(false)
+                        DashcamRecordingForegroundService.ensureStopped(app)
+                        stopTimer()
+                        stopFrameUploadLoop()
+                        stopSegmentRotateWatch()
+                        return@launch
+                    }
+                    val next = recordingController
+                    if (next == null) {
+                        Log.w(TAG, "分段后相机未就绪，等待重绑后自动续录")
+                        _isRecording.value = false
+                        setRecordingStarting(false)
+                        hasAutoStarted = false
+                        return@launch
+                    }
+                    // 保持 _isRecording=true，避免 UI 闪停；startRecording 在 segmentRotating 时放行
+                    recordingStartedAtElapsedMs = SystemClock.elapsedRealtime()
+                    _elapsedSeconds.value = 0
+                    startRecording(next)
+                    if (!recordingStartInProgress.get() && !next.isRecording) {
+                        Log.w(TAG, "分段后续录未启动，等待自动重试")
+                        _isRecording.value = false
+                        hasAutoStarted = false
+                        DashcamRecordingForegroundService.ensureStopped(app)
+                        stopTimer()
+                        stopFrameUploadLoop()
+                    }
+                } finally {
+                    segmentRotating.set(false)
+                }
+            }
+        }
+    }
+
     private fun startTimer() {
         timerJob?.cancel()
         timerJob = viewModelScope.launch {
@@ -739,9 +821,12 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         frameUploadJob = null
     }
 
-    private fun scheduleCompressRecording(output: DashcamVideoOutput) {
-        compressJob?.cancel()
-        compressJob = viewModelScope.launch {
+    private fun scheduleCompressRecording(
+        output: DashcamVideoOutput,
+        durationSec: Int = _elapsedSeconds.value.coerceAtLeast(1),
+    ) {
+        // 不 cancel 上一段压缩，允许多段并行收尾
+        viewModelScope.launch {
             val ready = withContext(Dispatchers.IO) {
                 DashcamRecordingStore.waitForVideoReady(app, output)
             }
@@ -768,7 +853,7 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 exportRecordingToGallery(compressed.sdcard0File)
                 scheduleVideoUpload(
                     file = compressed.sdcard0File,
-                    durationSec = _elapsedSeconds.value.coerceAtLeast(1),
+                    durationSec = durationSec,
                     recordTimeMs = compressed.sdcard0File.lastModified().takeIf { it > 0L }
                         ?: System.currentTimeMillis(),
                 )
@@ -777,11 +862,15 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                 exportRecordingToGallery(file)
                 scheduleVideoUpload(
                     file = file,
-                    durationSec = _elapsedSeconds.value.coerceAtLeast(1),
+                    durationSec = durationSec,
                     recordTimeMs = file.lastModified().takeIf { it > 0L }
                         ?: System.currentTimeMillis(),
                 )
             }
+            withContext(Dispatchers.IO) {
+                DashcamStorageCleaner.pruneIfStorageHigh(app)
+            }
+            refreshClips()
         }
     }
 
@@ -858,9 +947,9 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         DashcamForeground.setActive(false)
         SharedCameraCapture.dashcamSession = null
         stopFrameUploadLoop()
+        stopSegmentRotateWatch()
         cancelRecordingStartTimeout()
         cameraReadyWaitJob?.cancel()
-        compressJob?.cancel()
         RecordingFrameTts.shutdown()
         localVoiceRecognizer?.destroy()
         localVoiceRecognizer = null
