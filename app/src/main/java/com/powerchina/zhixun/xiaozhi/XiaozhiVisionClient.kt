@@ -100,7 +100,7 @@ object XiaozhiVisionClient {
 
         client(context).newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
-            Log.i(TAG, "隐患检测 HTTP ${response.code} kind=$kind 响应: ${raw.take(800)}")
+            logResponseBody(response.code, kind, raw)
             if (response.code != 200) {
                 throw IllegalStateException("隐患检测 HTTP ${response.code}: $raw")
             }
@@ -108,6 +108,33 @@ object XiaozhiVisionClient {
         }
     }.onFailure { e ->
         Log.e(TAG, "隐患检测失败 kind=$kind", e)
+    }
+
+    /** logcat 单行约 4KB，分段打印完整返回体 */
+    private fun logResponseBody(code: Int, kind: VisionCheckKind, raw: String) {
+        Log.i(TAG, "拍照上传接口 HTTP $code kind=$kind 返回长度=${raw.length}")
+        Log.i("shuoyu", "拍照上传接口 HTTP $code kind=$kind 返回长度=${raw.length}")
+        if (raw.isEmpty()) {
+            Log.i(TAG, "拍照上传接口返回: <empty>")
+            Log.i("shuoyu", "拍照上传接口返回: <empty>")
+            return
+        }
+        val chunkSize = 3500
+        if (raw.length <= chunkSize) {
+            Log.i(TAG, "拍照上传接口返回: $raw")
+            Log.i("shuoyu", "拍照上传接口返回: $raw")
+            return
+        }
+        var index = 0
+        var part = 1
+        while (index < raw.length) {
+            val end = (index + chunkSize).coerceAtMost(raw.length)
+            val chunk = raw.substring(index, end)
+            Log.i(TAG, "拍照上传接口返回[$part]: $chunk")
+            Log.i("shuoyu", "拍照上传接口返回[$part]: $chunk")
+            index = end
+            part++
+        }
     }
 
     /** MAC 地址保留 ":" 分隔 */
@@ -142,6 +169,15 @@ object XiaozhiVisionClient {
             response = responseText,
             rawJson = raw,
         )
+    }
+
+    /**
+     * 从检测原始 JSON 提取可播报文案；无隐患或空则 null。
+     * 供录屏帧上传等与 MCP 共用同一套解析。
+     */
+    fun speakTextFromDetectRaw(raw: String): String? {
+        val text = extractHazardText(raw).trim()
+        return if (text.isBlank() || text == NO_HAZARD_TEXT) null else text
     }
 
     /**

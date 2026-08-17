@@ -75,6 +75,7 @@ object DashcamMarkedImgUploader {
         client(context).newCall(request).execute().use { response ->
             val raw = response.body?.string().orEmpty()
             Log.i(logTag, "uploadMarkedImg HTTP ${response.code} 响应: $raw")
+            Log.i("shuoyu", "拍照上传接口 HTTP ${response.code} 返回: $raw")
             if (!response.isSuccessful) {
                 throw IllegalStateException("HTTP ${response.code}: $raw")
             }
@@ -82,5 +83,6 @@ object DashcamMarkedImgUploader {
         }
     }.onFailure { e ->
         Log.e(logTag, "uploadMarkedImg 失败", e)
+        Log.e("shuoyu", "拍照上传接口失败", e)
     }
 }

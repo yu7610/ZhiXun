@@ -26,6 +26,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class PhotoFollowUpMode {
     Capture,
@@ -811,8 +812,13 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
             while (isActive && _isRecording.value) {
                 delay(FRAME_UPLOAD_INTERVAL_MS)
                 if (!_isRecording.value) break
-                captureAndUploadFrame()
+                try {
+                    captureAndUploadFrame()
+                } catch (t: Throwable) {
+                    Log.e(RecordingFrameUploader.TAG, "录屏帧上传异常", t)
+                }
             }
+            Log.i(RecordingFrameUploader.TAG, "录屏帧上传已停止")
         }
     }
 
@@ -903,12 +909,16 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
         }
         val frameFile = File(app.cacheDir, "rec_frame_${System.currentTimeMillis()}.jpg")
         try {
-            val captured = suspendCaptureFrame(session, frameFile)
+            Log.i(RecordingFrameUploader.TAG, "开始抓帧…")
+            val captured = withTimeoutOrNull(4_000L) {
+                suspendCaptureFrame(session, frameFile)
+            }
             if (captured == null) {
-                Log.w(RecordingFrameUploader.TAG, "抓帧失败")
+                Log.w(RecordingFrameUploader.TAG, "抓帧失败或超时")
                 frameFile.delete()
                 return
             }
+            Log.i(RecordingFrameUploader.TAG, "抓帧成功 ${captured.name} size=${captured.length()}B，开始上传")
             withContext(Dispatchers.IO) {
                 val jpegBytes = XiaozhiPhotoUploader.compressJpegForUpload(captured)
                 val deviceId = ConfigManager(getApplication()).loadConfig().macAddress
@@ -923,6 +933,11 @@ class DashcamViewModel(application: Application) : AndroidViewModel(application)
                     withContext(Dispatchers.Main) {
                         RecordingFrameTts.speak(getApplication(), speakText)
                     }
+                } else {
+                    Log.i(
+                        RecordingFrameUploader.TAG,
+                        "本帧无播报文案 ok=${upload.isSuccess}",
+                    )
                 }
             }
         } finally {

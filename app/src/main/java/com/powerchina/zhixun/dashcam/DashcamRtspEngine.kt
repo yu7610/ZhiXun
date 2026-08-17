@@ -303,8 +303,31 @@ class DashcamRtspEngine(
             onResult(Result.failure(IllegalStateException("预览未启动")))
             return
         }
+        // startPreview(OpenGlView) 实际按 SurfaceView 走 GlStreamInterface 渲染，
+        // 必须在 glInterface 上 takePhoto；OpenGlView.takePhoto 永远不会回调。
+        val gl = runCatching { streamer.getGlInterface() }.getOrNull()
+        if (gl == null || !gl.isRunning) {
+            onResult(Result.failure(IllegalStateException("GL 预览未运行")))
+            return
+        }
+        var finished = false
+        fun finish(result: Result<File>) {
+            if (finished) return
+            finished = true
+            mainHandler.post { onResult(result) }
+        }
+        // 防止 takePhoto 不回调导致录屏帧上传死锁
+        val timeout = Runnable {
+            finish(Result.failure(IllegalStateException("抓帧超时")))
+        }
+        mainHandler.postDelayed(timeout, 3_000L)
         runCatching {
-            openGlView.takePhoto { bitmap ->
+            gl.takePhoto { bitmap ->
+                mainHandler.removeCallbacks(timeout)
+                if (bitmap == null || bitmap.isRecycled) {
+                    finish(Result.failure(IllegalStateException("抓帧 bitmap 为空")))
+                    return@takePhoto
+                }
                 runCatching {
                     outputFile.parentFile?.mkdirs()
                     FileOutputStream(outputFile).use { out ->
@@ -314,14 +337,18 @@ class DashcamRtspEngine(
                     }
                     if (!bitmap.isRecycled) bitmap.recycle()
                     require(outputFile.exists() && outputFile.length() > 0L) { "拍照文件为空" }
-                    onResult(Result.success(outputFile))
+                    Log.i(tag, "抓帧成功 ${outputFile.name} size=${outputFile.length()}B")
+                    finish(Result.success(outputFile))
                 }.onFailure { e ->
                     if (!bitmap.isRecycled) bitmap.recycle()
-                    onResult(Result.failure(e))
+                    Log.w(tag, "抓帧写文件失败", e)
+                    finish(Result.failure(e))
                 }
             }
         }.onFailure { e ->
-            onResult(Result.failure(e))
+            mainHandler.removeCallbacks(timeout)
+            Log.w(tag, "takePhoto 调用失败", e)
+            finish(Result.failure(e))
         }
     }
 

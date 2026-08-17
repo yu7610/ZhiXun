@@ -45,7 +45,10 @@ object XiaozhiPhotoUploader {
                 jpegBytes = jpegBytes,
                 filename = photoFile.name,
                 kind = kind,
-            ).getOrThrow()
+            ).getOrThrow().also { result ->
+                Log.i(TAG, "拍照上传接口返回 rawJson=${result.rawJson}")
+                Log.i(TAG, "拍照上传接口解析 text=${XiaozhiVisionClient.displayTextFromResult(result)}")
+            }
         }.onFailure { e ->
             Log.e(TAG, "MCP 视觉上传失败 kind=$kind", e)
         }
