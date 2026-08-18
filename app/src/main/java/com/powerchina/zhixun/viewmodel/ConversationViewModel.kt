@@ -68,8 +68,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         /** 说「退下」后过滤服务器回复：adb logcat -s SessionEndReply */
         private const val SESSION_END_TAG = "SessionEndReply"
         /** 全流程诊断：adb logcat -s VoiceFlow */
-        private const val SPEAKING_WATCHDOG_MS = 20_000L
+        private const val SPEAKING_WATCHDOG_MS = 90_000L
+        /** 已出声后句间静音超过该值才判定无音频 */
         private const val SPEAKING_NO_AUDIO_MS = 3_000L
+        /** 长回答合成首包可能较慢，未出声前放宽等待 */
+        private const val SPEAKING_FIRST_AUDIO_MS = 18_000L
+        /** 句间/句尾排空：连续空闲这么久才结束回合（对齐 Opus 播放空闲判定） */
+        private const val ASSISTANT_REPLY_IDLE_MS = 900L
         /** 已发送「拍照」后等待 MCP take_photo 的最长时间 */
         private const val PHOTO_MCP_WAIT_MS = 25_000L
         /** HTTP 500 等失败后，忽略服务端迟来 TTS，避免卡在说话中 */
@@ -225,6 +230,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private var pendingWakeRetryCount = 0
 
     private var speakingWatchdogJob: Job? = null
+    /**
+     * 普通助手回答进行中（多句 tts start/stop）。
+     * 用于：勿过早回聆听、勿丢 sentence_end、勿把续句当成迟来问候 abort。
+     */
+    private var assistantReplyActive = false
+    private var assistantReplyAudioReceived = false
+    private var assistantReplyTtsStopSeen = false
+    private var assistantReplyDrainJob: Job? = null
     private var photoMcpWaitJob: Job? = null
     private var photoMcpWaitToken = 0
     /** 已发「拍照」、尚未收到 MCP take_photo 本地成片前，忽略上一轮迟来 TTS */
@@ -992,7 +1005,14 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         if (last.role != MessageRole.ASSISTANT) return true
         val current = last.content.trim()
         if (current.isBlank()) return true
-        if (current == text || current.contains(text) || text.contains(current)) {
+        if (current == text) return false
+        // 服务端发来更长的累积全文：必须允许更新（否则长回答气泡卡在短前缀）
+        if (text.length > current.length &&
+            (text.startsWith(current) || text.contains(current))
+        ) {
+            return true
+        }
+        if (current.contains(text) || text.contains(current)) {
             return false
         }
         return true
@@ -1119,6 +1139,12 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun shouldIgnoreStaleReplyWhileListening(): Boolean {
         if (shouldIgnoreStalePhotoTtsControl()) return true
         if (XiaozhiAppEvents.isPhotoSessionActive()) return false
+        // 助手长回答尚未播完/文案未落定时，勿当「迟来回显」丢掉
+        if (assistantReplyActive || audioManager.isPlaying() ||
+            assistantReplyDrainJob?.isActive == true
+        ) {
+            return false
+        }
         return _state.value == ConversationState.LISTENING &&
             isAutoMode &&
             audioManager.isRecording() &&
@@ -2381,6 +2407,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private fun shutdownAllConversationTasks() {
         cancelListenHandoff("shutdown_tasks")
         cancelSpeakingWatchdog()
+        clearAssistantReplyTurn("shutdown_tasks")
         cancelSessionEndFallback()
         stopListeningKeepalive()
         standbyReadyPollJob?.cancel()
@@ -2403,6 +2430,92 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         speakingWatchdogJob = null
     }
 
+    private fun markAssistantReplyActive(reason: String) {
+        if (isWakeGreetingTurn() || pendingSessionEnd ||
+            XiaozhiAppEvents.isPhotoSessionActive() || photoRoundAwaitingTtsFinish
+        ) {
+            return
+        }
+        if (!assistantReplyActive) {
+            Log.i(TAG, "助手回答回合开始 reason=$reason")
+        }
+        assistantReplyActive = true
+        assistantReplyTtsStopSeen = false
+        cancelAssistantReplyDrain()
+    }
+
+    private fun clearAssistantReplyTurn(reason: String) {
+        if (!assistantReplyActive && !assistantReplyAudioReceived &&
+            !assistantReplyTtsStopSeen && assistantReplyDrainJob == null
+        ) {
+            return
+        }
+        Log.i(TAG, "助手回答回合结束 reason=$reason")
+        assistantReplyActive = false
+        assistantReplyAudioReceived = false
+        assistantReplyTtsStopSeen = false
+        cancelAssistantReplyDrain()
+    }
+
+    private fun cancelAssistantReplyDrain() {
+        assistantReplyDrainJob?.cancel()
+        assistantReplyDrainJob = null
+    }
+
+    private fun shouldDeferAssistantReplyFinish(): Boolean {
+        if (pendingSessionEnd) return false
+        if (isWakeGreetingTurn()) return false
+        if (XiaozhiAppEvents.isPhotoSessionActive() ||
+            photoRoundAwaitingTtsFinish ||
+            stateBeforePhotoRound != null ||
+            photoStartedFromStandby
+        ) {
+            return false
+        }
+        return assistantReplyActive ||
+            _state.value == ConversationState.SPEAKING ||
+            audioManager.isPlaying()
+    }
+
+    /**
+     * 普通多句 TTS：每句 stop 后先等播完；若又来 start 则取消排空继续说。
+     * 避免长回答中间 stop 立刻回「聆听中」并丢掉后续文案。
+     */
+    private fun scheduleAssistantReplyDrain(trigger: String) {
+        if (assistantReplyDrainJob?.isActive == true) return
+        assistantReplyDrainJob = viewModelScope.launch {
+            Log.i(
+                TAG,
+                "助手回答排空等待 trigger=$trigger play=${audioManager.isPlaying()} " +
+                    "audioRecv=$assistantReplyAudioReceived",
+            )
+            if (!assistantReplyAudioReceived && !audioManager.isPlaying()) {
+                delay(400)
+            }
+            var idleSince = 0L
+            val deadline = System.currentTimeMillis() + SPEAKING_WATCHDOG_MS
+            while (System.currentTimeMillis() < deadline) {
+                if (!assistantReplyTtsStopSeen) {
+                    // 续句 start 已取消 stopSeen：本轮排空作废
+                    Log.d(TAG, "助手回答排空取消（续句中）")
+                    return@launch
+                }
+                if (audioManager.isPlaying()) {
+                    idleSince = 0L
+                } else {
+                    if (idleSince == 0L) idleSince = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - idleSince >= ASSISTANT_REPLY_IDLE_MS) {
+                        break
+                    }
+                }
+                delay(50)
+            }
+            assistantReplyDrainJob = null
+            clearAssistantReplyTurn("drain_$trigger")
+            finishSpeakingTurn(trigger)
+        }
+    }
+
     private fun scheduleSpeakingWatchdog() {
         if (XiaozhiAppEvents.isPhotoSessionActive() &&
             _state.value == ConversationState.PROCESSING
@@ -2417,26 +2530,69 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             return
         }
         cancelSpeakingWatchdog()
-        VoiceFlowLog.step("tts.watchdog", "启动 noAudio=${SPEAKING_NO_AUDIO_MS}ms total=${SPEAKING_WATCHDOG_MS}ms")
+        val firstWait = if (assistantReplyAudioReceived) {
+            SPEAKING_NO_AUDIO_MS
+        } else {
+            SPEAKING_FIRST_AUDIO_MS
+        }
+        VoiceFlowLog.step(
+            "tts.watchdog",
+            "启动 firstWait=${firstWait}ms total=${SPEAKING_WATCHDOG_MS}ms",
+        )
         speakingWatchdogJob = viewModelScope.launch {
-            delay(SPEAKING_NO_AUDIO_MS)
-            if (_state.value == ConversationState.SPEAKING && !audioManager.isPlaying()) {
+            delay(firstWait)
+            if (_state.value != ConversationState.SPEAKING) return@launch
+            if (assistantReplyDrainJob?.isActive == true) return@launch
+            if (!audioManager.isPlaying() && !assistantReplyAudioReceived) {
                 VoiceFlowLog.warn(
                     "tts.watchdog",
-                    "${SPEAKING_NO_AUDIO_MS}ms 无音频播放 → finishSpeakingTurn | ${flowContext()}",
+                    "${firstWait}ms 无音频播放 → finishSpeakingTurn | ${flowContext()}",
                 )
-                Log.w(TAG, "TTS ${SPEAKING_NO_AUDIO_MS}ms 无音频，恢复聆听")
+                Log.w(TAG, "TTS ${firstWait}ms 无音频，恢复聆听")
+                clearAssistantReplyTurn("watchdog_no_audio")
                 audioManager.stopPlaying()
                 finishSpeakingTurn("watchdog_no_audio")
                 return@launch
             }
-            delay(SPEAKING_WATCHDOG_MS - SPEAKING_NO_AUDIO_MS)
+            var idleSince = 0L
+            val deadline = System.currentTimeMillis() + SPEAKING_WATCHDOG_MS
+            while (_state.value == ConversationState.SPEAKING &&
+                System.currentTimeMillis() < deadline
+            ) {
+                if (assistantReplyDrainJob?.isActive == true) return@launch
+                if (audioManager.isPlaying()) {
+                    idleSince = 0L
+                } else if (assistantReplyTtsStopSeen) {
+                    // 交给排空逻辑结束回合
+                    return@launch
+                } else {
+                    if (idleSince == 0L) idleSince = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - idleSince >= SPEAKING_NO_AUDIO_MS) {
+                        VoiceFlowLog.warn(
+                            "tts.watchdog",
+                            "播放空闲 ${SPEAKING_NO_AUDIO_MS}ms → finishSpeakingTurn",
+                        )
+                        clearAssistantReplyTurn("watchdog_idle")
+                        audioManager.stopPlaying()
+                        finishSpeakingTurn("watchdog_idle")
+                        return@launch
+                    }
+                }
+                delay(200)
+            }
             if (_state.value != ConversationState.SPEAKING) return@launch
+            if (audioManager.isPlaying() || assistantReplyAudioReceived) {
+                Log.w(TAG, "TTS 绝对超时仍在播，改走排空")
+                assistantReplyTtsStopSeen = true
+                scheduleAssistantReplyDrain("watchdog_timeout_drain")
+                return@launch
+            }
             VoiceFlowLog.warn(
                 "tts.watchdog",
                 "${SPEAKING_WATCHDOG_MS}ms 未收到 stop → finishSpeakingTurn | ${flowContext()}",
             )
             Log.w(TAG, "TTS 超时未收到 stop，强制恢复")
+            clearAssistantReplyTurn("watchdog_timeout")
             audioManager.stopPlaying()
             finishSpeakingTurn("watchdog_timeout")
         }
@@ -2444,6 +2600,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private fun finishSpeakingTurn(trigger: String = "tts_stop") {
         cancelSpeakingWatchdog()
+        cancelAssistantReplyDrain()
         VoiceFlowLog.step("tts.finish", "trigger=$trigger | ${flowContext()}")
         if (photoRoundAwaitingTtsFinish) {
             // 结果已播完：短时静音，避免服务端紧接第二轮同内容 TTS
@@ -2559,6 +2716,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 XiaozhiWakeCoordinator.isWakeHandoffInProgress() ||
                 listenHandoffJob?.isActive == true)
         ) {
+            clearAssistantReplyTurn("finish_$trigger")
             audioManager.stopPlaying()
             if (_state.value == ConversationState.SPEAKING) {
                 audioManager.stopRecording()
@@ -2580,6 +2738,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
             return
         }
+        clearAssistantReplyTurn("finish_standby_$trigger")
         audioManager.stopRecording()
         enterStandby("tts_end", notifyServer = false)
     }
@@ -2699,6 +2858,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     ) {
         cancelListenHandoff("enterStandby:$reason")
         cancelSpeakingWatchdog()
+        clearAssistantReplyTurn("enterStandby:$reason")
         cancelSessionEndFallback()
         cancelSessionEndStandby()
         stopListeningKeepalive()
@@ -3384,6 +3544,15 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                                     Log.i(PhotoKeyLog.TAG, "拍照结果 TTS start → SPEAKING")
                                     return@handleTextMessage
                                 }
+                                // 长回答多句：中间曾误回聆听时，续句应继续 SPEAKING，勿 abort
+                                if (assistantReplyActive || audioManager.isPlaying()) {
+                                    markAssistantReplyActive("tts_start_resume")
+                                    audioManager.stopRecording()
+                                    transitionState(ConversationState.SPEAKING, "assistant_continue_tts")
+                                    scheduleSpeakingWatchdog()
+                                    Log.i(TAG, "助手续句 TTS start → 恢复说话中")
+                                    return@handleTextMessage
+                                }
                                 VoiceFlowLog.decision(
                                     "msg.tts.start",
                                     "→SPEAKING",
@@ -3423,6 +3592,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                                 Log.d(TAG, "忽略非对话中的 TTS start")
                                 return@handleTextMessage
                             }
+                            markAssistantReplyActive("tts_start")
                             transitionState(ConversationState.SPEAKING, "tts_start")
                             scheduleSpeakingWatchdog()
                             VoiceFlowLog.decision("msg.tts.start", "→SPEAKING", true, flowContext())
@@ -3506,6 +3676,22 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                                 Log.d(TAG, "聆听中忽略迟来 TTS stop")
                                 return@handleTextMessage
                             }
+                            // 普通长回答：句尾 stop 先排空，勿立刻 stopPlaying + 回聆听
+                            if (shouldDeferAssistantReplyFinish()) {
+                                assistantReplyTtsStopSeen = true
+                                cancelSpeakingWatchdog()
+                                VoiceFlowLog.step(
+                                    "msg.tts.stop",
+                                    "defer drain play=${audioManager.isPlaying()}",
+                                )
+                                Log.i(
+                                    TAG,
+                                    "助手回答 TTS stop → 等播完再回聆听 " +
+                                        "play=${audioManager.isPlaying()}",
+                                )
+                                scheduleAssistantReplyDrain("tts_stop")
+                                return@handleTextMessage
+                            }
                             if (!pendingSessionEnd) {
                                 audioManager.stopPlaying()
                             }
@@ -3535,6 +3721,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         when (_state.value) {
             ConversationState.LISTENING -> {
                 if (isAutoMode && !isWakeGreetingTurn()) {
+                    markAssistantReplyActive("binary_leads")
                     audioManager.stopRecording()
                     transitionState(ConversationState.SPEAKING, "binary_leads_tts")
                     scheduleSpeakingWatchdog()
@@ -3542,7 +3729,16 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             }
             ConversationState.PROCESSING -> {
                 if (!pendingSessionEnd) {
+                    markAssistantReplyActive("binary_leads")
                     transitionState(ConversationState.SPEAKING, "binary_leads_tts")
+                    scheduleSpeakingWatchdog()
+                }
+            }
+            ConversationState.SPEAKING -> {
+                // 长回答持续下行：刷新看门狗，避免绝对超时误杀
+                if (assistantReplyActive && speakingWatchdogJob?.isActive != true &&
+                    assistantReplyDrainJob?.isActive != true
+                ) {
                     scheduleSpeakingWatchdog()
                 }
             }
@@ -3591,6 +3787,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 mqttManager.stopWakeGreetingNatKeepalive("first_greeting_opus")
                 Log.i(TAG, "首帧问候 Opus ${data.size}B state=${_state.value}")
             }
+        }
+        if (assistantReplyActive || _state.value == ConversationState.SPEAKING) {
+            assistantReplyAudioReceived = true
         }
         ensureDownlinkPlaybackReady()
         Log.d(TAG, "收到音频 ${data.size} bytes state=${_state.value}")
@@ -3981,8 +4180,21 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
             !startNew
         ) {
             val lastMessage = currentMessages.last()
-            val merged = sanitizeAssistantText(lastMessage.content + text)
-            if (merged.isBlank() || merged == lastMessage.content) return
+            val cleanedIncoming = sanitizeAssistantText(text)
+            if (cleanedIncoming.isBlank()) return
+            val existing = lastMessage.content
+            val merged = when {
+                existing.isBlank() -> cleanedIncoming
+                cleanedIncoming == existing -> return
+                // 累积全文：用更长文本替换，避免重复拼接
+                cleanedIncoming.startsWith(existing) -> cleanedIncoming
+                cleanedIncoming.contains(existing) &&
+                    cleanedIncoming.length > existing.length -> cleanedIncoming
+                existing.startsWith(cleanedIncoming) -> return
+                existing.contains(cleanedIncoming) -> return
+                else -> sanitizeAssistantText(existing + cleanedIncoming)
+            }
+            if (merged.isBlank() || merged == existing) return
             currentMessages[currentMessages.size - 1] = lastMessage.copy(content = merged)
             _messages.value = currentMessages
         } else {

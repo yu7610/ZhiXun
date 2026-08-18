@@ -27,7 +27,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -49,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,10 +64,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -517,13 +519,22 @@ private fun MessageList(
     modifier: Modifier = Modifier
 ) {
     val listState = rememberLazyListState()
+    // 用户上滑看历史时不强制跟滚；回到底部附近后恢复贴底
+    var stickToBottom by remember { mutableStateOf(true) }
+    val isNearBottom by remember {
+        derivedStateOf { listState.isNearBottom(thresholdPx = 120) }
+    }
 
-    // 自动滚动到底部：当消息数量、内容或图片变化时触发
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) return@LaunchedEffect
+        stickToBottom = isNearBottom
+    }
+
+    // 自动贴底：滚到最后一条的底部（不是条目顶部），避免长文被拽回开头
     val lastMessageContent = messages.lastOrNull()?.let { "${it.content}:${it.imagePath}" }
-    LaunchedEffect(messages.size, lastMessageContent) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
-        }
+    LaunchedEffect(messages.size, lastMessageContent, stickToBottom) {
+        if (messages.isEmpty() || !stickToBottom) return@LaunchedEffect
+        listState.scrollToAbsoluteBottom()
     }
 
     CompositionLocalProvider(
@@ -539,6 +550,32 @@ private fun MessageList(
                 ChatBubble(message = message)
             }
         }
+    }
+}
+
+/** 是否已靠近列表真实底部（含最后一条超长气泡的尾部） */
+private fun LazyListState.isNearBottom(thresholdPx: Int): Boolean {
+    val info = layoutInfo
+    val total = info.totalItemsCount
+    if (total == 0) return true
+    val lastVisible = info.visibleItemsInfo.lastOrNull() ?: return true
+    if (lastVisible.index < total - 1) return false
+    val itemBottom = lastVisible.offset + lastVisible.size
+    return itemBottom <= info.viewportEndOffset + thresholdPx
+}
+
+/** 滚到最后一条消息的底部，而不是条目顶部 */
+private suspend fun LazyListState.scrollToAbsoluteBottom() {
+    val lastIndex = layoutInfo.totalItemsCount - 1
+    if (lastIndex < 0) return
+    scrollToItem(lastIndex)
+    // 等一帧让超长气泡完成测量，再对齐真正底部
+    withFrameNanos { }
+    val info = layoutInfo
+    val lastItem = info.visibleItemsInfo.lastOrNull { it.index == lastIndex } ?: return
+    val overflow = (lastItem.offset + lastItem.size) - info.viewportEndOffset
+    if (overflow > 1) {
+        scrollBy(overflow.toFloat())
     }
 }
 
