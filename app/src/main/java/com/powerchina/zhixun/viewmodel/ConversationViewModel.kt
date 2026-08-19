@@ -73,8 +73,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         private const val SPEAKING_NO_AUDIO_MS = 3_000L
         /** 长回答合成首包可能较慢，未出声前放宽等待 */
         private const val SPEAKING_FIRST_AUDIO_MS = 18_000L
-        /** 句间/句尾排空：连续空闲这么久才结束回合（对齐 Opus 播放空闲判定） */
-        private const val ASSISTANT_REPLY_IDLE_MS = 900L
+        /** 句间/句尾排空：连续空闲这么久才结束回合（略高于 Opus 700ms 空闲判定） */
+        private const val ASSISTANT_REPLY_IDLE_MS = 1_000L
         /** 已发送「拍照」后等待 MCP take_photo 的最长时间 */
         private const val PHOTO_MCP_WAIT_MS = 25_000L
         /** HTTP 500 等失败后，忽略服务端迟来 TTS，避免卡在说话中 */
@@ -91,8 +91,13 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         private const val MAX_PHOTO_KEY_RETRIES = 20
         /** 服务端 listen 会话约 30s 超时，对话聆听中需 stop+start 续期（与 WakeSTT 一致） */
         private const val LISTEN_KEEPALIVE_INTERVAL_MS = 12_000L
-        /** 近几秒有上行语音则跳过续期，避免打断正在说的话（偶发识别失败） */
-        private const val LISTEN_KEEPALIVE_UPLINK_GUARD_MS = 2_500L
+        /**
+         * 距上次上行语音不足该时间则暂缓续期。
+         * 句末静音后服务端仍在收尾 STT，过早 stop+start 会丢掉本句 → 一直显示「聆听中」。
+         */
+        private const val LISTEN_KEEPALIVE_UPLINK_GUARD_MS = 8_000L
+        /** 即使仍在保护窗内，距上次续期超过该值也强制续期，避免 listen 30s 过期 */
+        private const val LISTEN_KEEPALIVE_FORCE_MS = 20_000L
 
         private val ASSISTANT_TOOL_MARKER = Regex(
             """%\s*get_weather(?:\{[^}]*\}|[^\u4e00-\u9fff%]*)""",
@@ -1370,8 +1375,17 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
                 }
                 val now = System.currentTimeMillis()
                 if (now - lastRenew < LISTEN_KEEPALIVE_INTERVAL_MS) continue
-                // 正在说话时续期会截断 STT，表现为偶发「说了没识别」
-                if (now - lastUplinkAudioAtMs < LISTEN_KEEPALIVE_UPLINK_GUARD_MS) {
+                // 句末静音后服务端仍在收尾 STT：暂缓续期，避免丢掉本句一直卡在「聆听中」
+                val sinceUplink = now - lastUplinkAudioAtMs
+                val sinceRenew = now - lastRenew
+                if (lastUplinkAudioAtMs > 0L &&
+                    sinceUplink < LISTEN_KEEPALIVE_UPLINK_GUARD_MS &&
+                    sinceRenew < LISTEN_KEEPALIVE_FORCE_MS
+                ) {
+                    Log.d(
+                        TAG,
+                        "跳过 listen 续期（保护句末 STT） uplinkAgo=${sinceUplink}ms renewAgo=${sinceRenew}ms",
+                    )
                     continue
                 }
                 renewListenSession("keepalive")
